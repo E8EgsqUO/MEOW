@@ -269,9 +269,27 @@ func (pp proxyParser) ProxyMeow(val string) {
 	parentProxy.add(parent)
 }
 
+// -------------------------------
+func (pp proxyParser) ProxyRelay(val string) {
+	if err := checkServerAddr(val); err != nil {
+		Fatal("parent relay server", err)
+	}
+	parentProxy.add(newRelayParent(val))
+}
+
 // listenParser provides functions to parse different types of listen addresses
 type listenParser struct{}
 
+func (lp listenParser) ListenRelay(val string, proto string) {
+	if cmdHasListenAddr {
+		return
+	}
+	if err := checkServerAddr(val); err != nil {
+		Fatal("listen", proto, "server", err)
+	}
+	addListenProxy(newRelayProxy(val))
+}
+// -------------------------------
 func (lp listenParser) ListenHttp(val string, proto string) {
 	if cmdHasListenAddr {
 		return
