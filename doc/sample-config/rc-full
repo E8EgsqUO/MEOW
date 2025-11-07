@@ -6,6 +6,9 @@
 #
 # 支持的 protocol 如下：
 #
+# RELAY # 客户端12s, 服务器8s
+#   listen = relay://127.0.0.1:2048?ack=8s
+#
 # HTTP (提供 http 代理):
 #   listen = http://127.0.0.1:4411
 #
@@ -60,6 +63,8 @@ listen = http://127.0.0.1:4411
 # 重复使用 proxy 多次指定多个二级代理，backup 策略将按照二级代理出现的顺序来使用
 #
 # 目前支持的二级代理及配置举例：
+# RELAY:
+#   proxy = relay://127.0.0.1:2048
 #
 # SOCKS5:
 #   proxy = socks5://127.0.0.1:1080
