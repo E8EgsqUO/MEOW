@@ -4,9 +4,11 @@ meow-proxy
 MEOW
 MEOW.exe
 MEOW-*.exe
+/*.exe
 direct.txt
 rc.txt
 rc-full.txt
 debug.log
+debug.txt
 proxy.txt
 reject.txt
