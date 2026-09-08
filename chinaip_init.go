@@ -3,14 +3,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"net"
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/cyfdecyf/bufio"
 )
 
 // data range by first byte

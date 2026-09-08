@@ -1,9 +1,19 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"testing"
+	"time"
 )
+
+func TestAuthDigestRejectsFutureNonce(t *testing.T) {
+	nonce := fmt.Sprintf("%x", time.Now().Add(time.Minute).Unix())
+	header := fmt.Sprintf("nonce=%s, username=user, qop=auth, response=unused", nonce)
+	if err := authDigest(nil, &Request{}, header); err != errAuthRequired {
+		t.Fatalf("future nonce returned %v, want %v", err, errAuthRequired)
+	}
+}
 
 func TestParseUserPasswd(t *testing.T) {
 	testData := []struct {

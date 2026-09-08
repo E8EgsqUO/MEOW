@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
@@ -20,7 +22,7 @@ import (
 
 // Interface that all types of parent proxies should support.
 type ParentProxy interface {
-	connect(*URL) (net.Conn, error)
+	connect(context.Context, *URL) (net.Conn, error)
 	getServer() string // for use in updating server latency
 	genConfig() string // for upgrading config
 }
@@ -31,14 +33,14 @@ type ParentPool interface {
 	empty() bool
 	// Select a proxy from the pool and connect. May try several proxies until
 	// one that succees, return nil and error if all parent proxies fail.
-	connect(*URL) (net.Conn, error)
+	connect(context.Context, *URL) (net.Conn, error)
 }
 
 // Init parentProxy to be backup pool. So config parsing have a pool to add
 // parent proxies.
 var parentProxy ParentPool = &backupParentPool{}
 
-func initParentPool() {
+func initParentPool(ctx context.Context) {
 	backPool, ok := parentProxy.(*backupParentPool)
 	if !ok {
 		panic("initial parent pool should be backup pool")
@@ -61,7 +63,7 @@ func initParentPool() {
 		parentProxy = &hashParentPool{*backPool}
 	case loadBalanceLatency:
 		debug.Println("latency parent pool", len(backPool.parent))
-		go updateParentProxyLatency()
+		go updateParentProxyLatency(ctx)
 		parentProxy = newLatencyParentPool(backPool.parent)
 	}
 }
@@ -84,7 +86,32 @@ func printParentProxy(parent []ParentWithFail) {
 
 type ParentWithFail struct {
 	ParentProxy
-	fail int
+	fail int32
+}
+
+// parentReplyError means the parent was reached and returned a valid protocol
+// response which rejected the requested connection. Such a response may be a
+// target or policy failure, but it is positive evidence that the parent itself
+// is alive and must not reduce its availability score.
+type parentReplyError struct {
+	parent string
+	target string
+	reply  byte
+	reason string
+}
+
+func (err *parentReplyError) Error() string {
+	return fmt.Sprintf("SOCKS5 parent %s rejected target %s: %s (reply %d)",
+		err.parent, err.target, err.reason, err.reply)
+}
+
+func (err *parentReplyError) Unwrap() error {
+	return socksProtocolErr
+}
+
+func confirmsParentAvailable(err error) bool {
+	var replyErr *parentReplyError
+	return errors.As(err, &replyErr)
 }
 
 // Backup load balance strategy:
@@ -101,8 +128,8 @@ func (pp *backupParentPool) add(parent ParentProxy) {
 	pp.parent = append(pp.parent, ParentWithFail{parent, 0})
 }
 
-func (pp *backupParentPool) connect(url *URL) (srvconn net.Conn, err error) {
-	return connectInOrder(url, pp.parent, 0)
+func (pp *backupParentPool) connect(ctx context.Context, url *URL) (srvconn net.Conn, err error) {
+	return connectInOrder(ctx, url, pp.parent, 0)
 }
 
 // Hash load balance strategy:
@@ -111,26 +138,33 @@ type hashParentPool struct {
 	backupParentPool
 }
 
-func (pp *hashParentPool) connect(url *URL) (srvconn net.Conn, err error) {
+func (pp *hashParentPool) connect(ctx context.Context, url *URL) (srvconn net.Conn, err error) {
 	start := int(crc32.ChecksumIEEE([]byte(url.Host)) % uint32(len(pp.parent)))
 	debug.Printf("hash host %s try %d parent first", url.Host, start)
-	return connectInOrder(url, pp.parent, start)
+	return connectInOrder(ctx, url, pp.parent, start)
 }
 
-func (parent *ParentWithFail) connect(url *URL) (srvconn net.Conn, err error) {
+func (parent *ParentWithFail) connect(ctx context.Context, url *URL) (srvconn net.Conn, err error) {
 	const maxFailCnt = 30
-	srvconn, err = parent.ParentProxy.connect(url)
+	srvconn, err = parent.ParentProxy.connect(ctx, url)
 	if err != nil {
-		if parent.fail < maxFailCnt {
-			parent.fail++
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		if confirmsParentAvailable(err) {
+			atomic.StoreInt32(&parent.fail, 0)
+			return nil, err
+		}
+		if atomic.LoadInt32(&parent.fail) < maxFailCnt {
+			atomic.AddInt32(&parent.fail, 1)
 		}
 		return
 	}
-	parent.fail = 0
+	atomic.StoreInt32(&parent.fail, 0)
 	return
 }
 
-func connectInOrder(url *URL, pp []ParentWithFail, start int) (srvconn net.Conn, err error) {
+func connectInOrder(ctx context.Context, url *URL, pp []ParentWithFail, start int) (srvconn net.Conn, err error) {
 	const baseFailCnt = 9
 	var skipped []int
 	nproxy := len(pp)
@@ -140,20 +174,24 @@ func connectInOrder(url *URL, pp []ParentWithFail, start int) (srvconn net.Conn,
 	}
 
 	for i := 0; i < nproxy; i++ {
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
 		proxyId := (start + i) % nproxy
 		parent := &pp[proxyId]
 		// skip failed server, but try it with some probability
-		if parent.fail > 0 && rand.Intn(parent.fail+baseFailCnt) != 0 {
+		fail := atomic.LoadInt32(&parent.fail)
+		if fail > 0 && rand.Intn(int(fail)+baseFailCnt) != 0 {
 			skipped = append(skipped, proxyId)
 			continue
 		}
-		if srvconn, err = parent.connect(url); err == nil {
+		if srvconn, err = parent.connect(ctx, url); err == nil {
 			return
 		}
 	}
 	// last resort, try skipped one, not likely to succeed
 	for _, skippedId := range skipped {
-		if srvconn, err = pp[skippedId].connect(url); err == nil {
+		if srvconn, err = pp[skippedId].connect(ctx, url); err == nil {
 			return
 		}
 	}
@@ -204,7 +242,7 @@ const latencyMax = time.Hour
 
 var latencyMutex sync.RWMutex
 
-func (pp *latencyParentPool) connect(url *URL) (srvconn net.Conn, err error) {
+func (pp *latencyParentPool) connect(ctx context.Context, url *URL) (srvconn net.Conn, err error) {
 	var lp []ParentWithLatency
 	// Read slice first.
 	latencyMutex.RLock()
@@ -218,12 +256,15 @@ func (pp *latencyParentPool) connect(url *URL) (srvconn net.Conn, err error) {
 	}
 
 	for i := 0; i < nproxy; i++ {
+		if err = ctx.Err(); err != nil {
+			return nil, err
+		}
 		parent := lp[i]
 		if parent.latency >= latencyMax {
 			skipped = append(skipped, i)
 			continue
 		}
-		if srvconn, err = parent.connect(url); err == nil {
+		if srvconn, err = parent.connect(ctx, url); err == nil {
 			debug.Println("lowest latency proxy", parent.getServer())
 			return
 		}
@@ -231,14 +272,14 @@ func (pp *latencyParentPool) connect(url *URL) (srvconn net.Conn, err error) {
 	}
 	// last resort, try skipped one, not likely to succeed
 	for _, skippedId := range skipped {
-		if srvconn, err = lp[skippedId].connect(url); err == nil {
+		if srvconn, err = lp[skippedId].connect(ctx, url); err == nil {
 			return
 		}
 	}
 	return nil, err
 }
 
-func (parent *ParentWithLatency) updateLatency(wg *sync.WaitGroup) {
+func (parent *ParentWithLatency) updateLatency(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	proxy := parent.ParentProxy
 	server := proxy.getServer()
@@ -249,7 +290,7 @@ func (parent *ParentWithLatency) updateLatency(wg *sync.WaitGroup) {
 	}
 
 	// Resolve host name first, so latency does not include resolve time.
-	ip, err := net.LookupIP(host)
+	ip, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
 		parent.latency = latencyMax
 		return
@@ -260,7 +301,7 @@ func (parent *ParentWithLatency) updateLatency(wg *sync.WaitGroup) {
 	var total time.Duration
 	for i := 0; i < N; i++ {
 		now := time.Now()
-		cn, err := net.Dial("tcp", ipPort)
+		cn, err := dialContext(ctx, "tcp", ipPort)
 		if err != nil {
 			debug.Println("latency update dial:", err)
 			total += time.Minute // 1 minute as penalty
@@ -269,13 +310,17 @@ func (parent *ParentWithLatency) updateLatency(wg *sync.WaitGroup) {
 		total += time.Now().Sub(now)
 		cn.Close()
 
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 	parent.latency = total / N
 	debug.Println("latency", server, parent.latency)
 }
 
-func (pp *latencyParentPool) updateLatency() {
+func (pp *latencyParentPool) updateLatency(ctx context.Context) {
 	// Create a copy, update latency for the copy.
 	var cp latencyParentPool
 	cp.parent = append(cp.parent, pp.parent...)
@@ -285,7 +330,7 @@ func (pp *latencyParentPool) updateLatency() {
 	var wg sync.WaitGroup
 	wg.Add(len(cp.parent))
 	for i, _ := range cp.parent {
-		cp.parent[i].updateLatency(&wg)
+		cp.parent[i].updateLatency(ctx, &wg)
 	}
 	wg.Wait()
 
@@ -299,16 +344,27 @@ func (pp *latencyParentPool) updateLatency() {
 	latencyMutex.Unlock()
 }
 
-func updateParentProxyLatency() {
+func updateParentProxyLatency(ctx context.Context) {
 	lp, ok := parentProxy.(*latencyParentPool)
 	if !ok {
 		return
 	}
 
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
 	for {
-		lp.updateLatency()
-		time.Sleep(60 * time.Second)
+		lp.updateLatency(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
+}
+
+func dialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: config.DialTimeout}
+	return dialer.DialContext(ctx, network, address)
 }
 
 type httpsParent struct {
@@ -351,10 +407,24 @@ func (hp *httpsParent) initAuth(userPasswd string) {
 	hp.authHeader = []byte(headerProxyAuthorization + ": Basic " + b64 + CRLF)
 }
 
-func (hp *httpsParent) connect(url *URL) (net.Conn, error) {
-	c, err := tls.Dial("tcp", hp.server, &tls.Config{
-		InsecureSkipVerify: true,
-	})
+func (hp *httpsParent) tlsConfig() *tls.Config {
+	host, _, err := net.SplitHostPort(hp.server)
+	if err != nil {
+		host = hp.server
+	}
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ServerName:         host,
+		InsecureSkipVerify: config.ProxyTLSInsecureSkipVerify,
+	}
+}
+
+func (hp *httpsParent) connect(ctx context.Context, url *URL) (net.Conn, error) {
+	dialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: config.DialTimeout},
+		Config:    hp.tlsConfig(),
+	}
+	c, err := dialer.DialContext(ctx, "tcp", hp.server)
 	if err != nil {
 		errl.Printf("can't connect to https parent %s for %s: %v\n",
 			hp.server, url.HostPort, err)
@@ -407,8 +477,8 @@ func (hp *httpParent) initAuth(userPasswd string) {
 	hp.authHeader = []byte(headerProxyAuthorization + ": Basic " + b64 + CRLF)
 }
 
-func (hp *httpParent) connect(url *URL) (net.Conn, error) {
-	c, err := net.Dial("tcp", hp.server)
+func (hp *httpParent) connect(ctx context.Context, url *URL) (net.Conn, error) {
+	c, err := dialContext(ctx, "tcp", hp.server)
 	if err != nil {
 		errl.Printf("can't connect to http parent %s for %s: %v\n",
 			hp.server, url.HostPort, err)
@@ -466,8 +536,25 @@ func (sp *shadowsocksParent) initCipher(method, passwd string) {
 	sp.cipher = cipher
 }
 
-func (sp *shadowsocksParent) connect(url *URL) (net.Conn, error) {
-	c, err := ss.Dial(url.HostPort, sp.server, sp.cipher.Copy())
+func (sp *shadowsocksParent) connect(ctx context.Context, url *URL) (net.Conn, error) {
+	rawAddr, err := ss.RawAddr(url.HostPort)
+	if err != nil {
+		return nil, err
+	}
+	rawConn, err := dialContext(ctx, "tcp", sp.server)
+	if err != nil {
+		err = fmt.Errorf("dial shadowsocks server: %w", err)
+		return nil, err
+	}
+	c := ss.NewConn(rawConn, sp.cipher.Copy())
+	if config.DialTimeout > 0 {
+		_ = c.SetWriteDeadline(time.Now().Add(config.DialTimeout))
+		defer c.SetWriteDeadline(zeroTime)
+	}
+	if _, err = c.Write(rawAddr); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
 	if err != nil {
 		errl.Printf("can't connect to shadowsocks parent %s for %s: %v\n",
 			sp.server, url.HostPort, err)
@@ -514,8 +601,8 @@ func (cp *meowParent) genConfig() string {
 	return fmt.Sprintf("proxy = meow://%s:%s@%s", method, cp.passwd, cp.server)
 }
 
-func (cp *meowParent) connect(url *URL) (net.Conn, error) {
-	c, err := net.Dial("tcp", cp.server)
+func (cp *meowParent) connect(ctx context.Context, url *URL) (net.Conn, error) {
+	c, err := dialContext(ctx, "tcp", cp.server)
 	if err != nil {
 		errl.Printf("can't connect to meow parent %s for %s: %v\n",
 			cp.server, url.HostPort, err)
@@ -552,6 +639,7 @@ var socksMsgVerMethodSelection = []byte{
 // socks5 parent proxy
 type socksParent struct {
 	server string
+	dial   func(context.Context, string, string) (net.Conn, error)
 }
 
 type socksConn struct {
@@ -564,7 +652,7 @@ func (s socksConn) String() string {
 }
 
 func newSocksParent(server string) *socksParent {
-	return &socksParent{server}
+	return &socksParent{server: server}
 }
 
 func (sp *socksParent) getServer() string {
@@ -575,12 +663,22 @@ func (sp *socksParent) genConfig() string {
 	return fmt.Sprintf("proxy = socks5://%s", sp.server)
 }
 
-func (sp *socksParent) connect(url *URL) (net.Conn, error) {
-	c, err := net.Dial("tcp", sp.server)
+func (sp *socksParent) connect(ctx context.Context, url *URL) (net.Conn, error) {
+	var c net.Conn
+	var err error
+	if sp.dial != nil {
+		c, err = sp.dial(ctx, "tcp", sp.server)
+	} else {
+		c, err = dialContext(ctx, "tcp", sp.server)
+	}
 	if err != nil {
 		errl.Printf("can't connect to socks parent %s for %s: %v\n",
 			sp.server, url.HostPort, err)
 		return nil, err
+	}
+	if config.ReadTimeout > 0 {
+		_ = c.SetDeadline(time.Now().Add(config.ReadTimeout))
+		defer c.SetDeadline(zeroTime)
 	}
 	hasErr := false
 	defer func() {
@@ -589,9 +687,8 @@ func (sp *socksParent) connect(url *URL) (net.Conn, error) {
 		}
 	}()
 
-	var n int
-	if n, err = c.Write(socksMsgVerMethodSelection); n != 3 || err != nil {
-		errl.Printf("sending ver/method selection msg %v n = %v\n", err, n)
+	if err = writeFull(c, socksMsgVerMethodSelection); err != nil {
+		errl.Printf("sending ver/method selection msg %v\n", err)
 		hasErr = true
 		return nil, err
 	}
@@ -608,7 +705,7 @@ func (sp *socksParent) connect(url *URL) (net.Conn, error) {
 		errl.Printf("socks ver/method selection reply error ver %d method %d",
 			repBuf[0], repBuf[1])
 		hasErr = true
-		return nil, err
+		return nil, socksProtocolErr
 	}
 	// debug.Println("Socks version selection done")
 
@@ -621,30 +718,42 @@ func (sp *socksParent) connect(url *URL) (net.Conn, error) {
 		return nil, err
 	}
 
-	hostLen := len(host)
-	bufLen := 5 + hostLen + 2 // last 2 is port
+	var addr []byte
+	var addrType byte
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			addrType, addr = 1, ip4
+		} else {
+			addrType, addr = 4, ip.To16()
+		}
+	} else {
+		if len(host) > 255 {
+			hasErr = true
+			return nil, fmt.Errorf("SOCKS5 target host is too long: %d bytes", len(host))
+		}
+		addrType = 3
+		addr = append([]byte{byte(len(host))}, host...)
+	}
+	bufLen := 4 + len(addr) + 2
 	reqBuf := make([]byte, bufLen)
 	reqBuf[0] = 5 // version 5
 	reqBuf[1] = 1 // cmd: connect
 	// reqBuf[2] = 0 // rsv: set to 0 when initializing
-	reqBuf[3] = 3 // atyp: domain name
-	reqBuf[4] = byte(hostLen)
-	copy(reqBuf[5:], host)
-	binary.BigEndian.PutUint16(reqBuf[5+hostLen:5+hostLen+2], uint16(port))
+	reqBuf[3] = addrType
+	copy(reqBuf[4:], addr)
+	binary.BigEndian.PutUint16(reqBuf[4+len(addr):], uint16(port))
 
-	if n, err = c.Write(reqBuf); err != nil || n != bufLen {
-		errl.Printf("send socks request err %v n %d\n", err, n)
+	if err = writeFull(c, reqBuf); err != nil {
+		errl.Printf("send socks request err %v\n", err)
 		hasErr = true
 		return nil, err
 	}
 
-	// I'm not clear why the buffer is fixed at 10. The rfc document does not say this.
-	// Polipo set this to 10 and I also observed the reply is always 10.
-	replyBuf := make([]byte, 10)
-	if n, err = c.Read(replyBuf); err != nil {
+	replyBuf := make([]byte, 4)
+	if _, err = io.ReadFull(c, replyBuf); err != nil {
 		// Seems that socks server will close connection if it can't find host
 		if err != io.EOF {
-			errl.Printf("read socks reply err %v n %d\n", err, n)
+			errl.Printf("read socks reply err %v\n", err)
 		}
 		hasErr = true
 		return nil, errors.New("connection failed (by socks server " + sp.server + "). No such host?")
@@ -657,14 +766,42 @@ func (sp *socksParent) connect(url *URL) (net.Conn, error) {
 		return nil, socksProtocolErr
 	}
 	if replyBuf[1] != 0 {
-		errl.Printf("socks reply connect %s error %s\n", url.HostPort, socksError[replyBuf[1]])
+		message := "unknown error"
+		if int(replyBuf[1]) < len(socksError) && socksError[replyBuf[1]] != "" {
+			message = socksError[replyBuf[1]]
+		}
+		replyErr := &parentReplyError{
+			parent: sp.server,
+			target: url.HostPort,
+			reply:  replyBuf[1],
+			reason: message,
+		}
+		errl.Println(replyErr)
 		hasErr = true
-		return nil, socksProtocolErr
+		return nil, replyErr
 	}
-	if replyBuf[3] != 1 {
+	var boundAddrLen int
+	switch replyBuf[3] {
+	case 1:
+		boundAddrLen = net.IPv4len
+	case 4:
+		boundAddrLen = net.IPv6len
+	case 3:
+		var length [1]byte
+		if _, err = io.ReadFull(c, length[:]); err != nil {
+			hasErr = true
+			return nil, err
+		}
+		boundAddrLen = int(length[0])
+	default:
 		errl.Printf("socks reply connect %s ATYP %d\n", url.HostPort, replyBuf[3])
 		hasErr = true
 		return nil, socksProtocolErr
+	}
+	// Consume BND.ADDR and BND.PORT so application bytes remain untouched.
+	if _, err = io.CopyN(io.Discard, c, int64(boundAddrLen+2)); err != nil {
+		hasErr = true
+		return nil, err
 	}
 
 	debug.Println("connected to:", url.HostPort, "via socks server:", sp.server)

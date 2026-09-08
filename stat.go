@@ -21,13 +21,11 @@ func initStat() {
 }
 
 func incCliCnt() int32 {
-	atomic.AddInt32(&status.cliCnt, 1)
-	return status.cliCnt
+	return atomic.AddInt32(&status.cliCnt, 1)
 }
 
 func decCliCnt() int32 {
-	atomic.AddInt32(&status.cliCnt, -1)
-	return status.cliCnt
+	return atomic.AddInt32(&status.cliCnt, -1)
 }
 
 func addSrvConnCnt(srv string, delta int) int {

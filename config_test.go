@@ -1,8 +1,48 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 )
+
+func TestInitConfigLocatesRuleFilesBesideRC(t *testing.T) {
+	originalConfig := config
+	defer func() { config = originalConfig }()
+	rcFile := filepath.Join(t.TempDir(), rcFname)
+	initConfig(rcFile)
+	if config.dir != filepath.Dir(rcFile) {
+		t.Fatalf("config directory = %q, want %q", config.dir, filepath.Dir(rcFile))
+	}
+	if config.ProxyFile != filepath.Join(filepath.Dir(rcFile), proxyFname) {
+		t.Fatalf("proxy file = %q", config.ProxyFile)
+	}
+}
+
+func TestFindConfigParserPreservesKeyMatching(t *testing.T) {
+	for _, key := range []string{"proxy", "Proxy", "loadBalance", "LoadBalance", "proxyTLSInsecureSkipVerify"} {
+		if _, ok := findConfigParser(key); !ok {
+			t.Errorf("documented config key %q was not found", key)
+		}
+	}
+	for _, key := range []string{"", "PROXY", "loadbalance", "unknown"} {
+		if _, ok := findConfigParser(key); ok {
+			t.Errorf("invalid config key %q was accepted", key)
+		}
+	}
+}
+
+func TestOverrideConfigPreservesLegacySemantics(t *testing.T) {
+	oldConfig := Config{LogFile: "configured.log", Core: 1, HttpErrorCode: 418, JudgeByIP: true}
+	override := Config{RcFile: "rc.txt", Core: 2, Cert: "cert.pem", JudgeByIP: false}
+	overrideConfig(&oldConfig, &override)
+
+	if oldConfig.RcFile != "rc.txt" || oldConfig.LogFile != "configured.log" || oldConfig.Core != 2 || oldConfig.Cert != "cert.pem" {
+		t.Fatalf("unexpected overridden config: %+v", oldConfig)
+	}
+	if !oldConfig.JudgeByIP || oldConfig.HttpErrorCode != 418 {
+		t.Fatalf("zero or non-overridable fields changed: %+v", oldConfig)
+	}
+}
 
 func TestParseListen(t *testing.T) {
 	parser := configParser{}

@@ -2,8 +2,8 @@ package main
 
 import (
 	"net"
-	"strings"
 	"os"
+	"strings"
 	"syscall"
 )
 

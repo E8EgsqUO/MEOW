@@ -2,20 +2,23 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-/* =========================
-   小工具：拆 addr 与查询参数
-   例: "1.2.3.4:2048?ack=12s&dial=8s"
-   ========================= */
+/*
+=========================
+
+	小工具：拆 addr 与查询参数
+	例: "1.2.3.4:2048?ack=12s&dial=8s"
+	=========================
+*/
 func splitAddrParams(raw string) (addr string, params map[string]string) {
 	addr = raw
 	params = make(map[string]string)
@@ -71,30 +74,16 @@ func urlHostPort(u *URL) (string, error) {
 	if host == "" {
 		return "", fmt.Errorf("empty host in URL")
 	}
-	var portStr string
-	switch v := interface{}(u.Port).(type) {
-	case int:
-		portStr = strconv.Itoa(v)
-	case int32:
-		portStr = strconv.Itoa(int(v))
-	case int64:
-		portStr = strconv.Itoa(int(v))
-	case uint16:
-		portStr = strconv.Itoa(int(v))
-	case string:
-		portStr = v
-	default:
-		portStr = fmt.Sprint(u.Port)
-	}
+	portStr := u.Port
 	if portStr == "" || portStr == "0" {
 		return "", fmt.Errorf("invalid port in URL")
 	}
 	return net.JoinHostPort(host, portStr), nil
 }
 
-func (p *relayParent) connect(u *URL) (net.Conn, error) {
+func (p *relayParent) connect(ctx context.Context, u *URL) (net.Conn, error) {
 	// 1) 连接 relay 服务器
-	c, err := net.Dial("tcp", p.addr)
+	c, err := dialContext(ctx, "tcp", p.addr)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +137,7 @@ type relayProxy struct {
 	addr           string
 	dialTimeout    time.Duration
 	headerMaxBytes int
+	dial           func(network, address string) (net.Conn, error)
 }
 
 func newRelayProxy(raw string) *relayProxy {
@@ -169,27 +159,51 @@ func newRelayProxy(raw string) *relayProxy {
 func (p *relayProxy) Addr() string      { return p.addr }
 func (p *relayProxy) genConfig() string { return "listen = relay://" + p.rawAddr }
 
-func (p *relayProxy) Serve(wg *sync.WaitGroup) {
-	defer wg.Done()
+func (p *relayProxy) Serve(ctx context.Context, wg *sync.WaitGroup) {
+	var clients sync.WaitGroup
+	defer func() {
+		clients.Wait()
+		wg.Done()
+	}()
 
 	ln, err := net.Listen("tcp", p.addr)
 	if err != nil {
 		log.Printf("[relay] listen %s failed: %v", p.addr, err)
 		return
 	}
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
 	log.Printf("[relay] listening on %s (dial=%s)", p.addr, p.dialTimeout)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			continue
 		}
-		go p.handleConn(c)
+		clients.Add(1)
+		go func() {
+			defer clients.Done()
+			p.handleConn(ctx, c)
+		}()
 	}
 }
 
-func (p *relayProxy) handleConn(cli net.Conn) {
+func (p *relayProxy) handleConn(ctx context.Context, cli net.Conn) {
 	defer cli.Close()
+	cancelDone := make(chan struct{})
+	defer close(cancelDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = cli.Close()
+		case <-cancelDone:
+		}
+	}()
 
 	// 开启 keepalive（客户端到 server）
 	if tc, ok := cli.(*net.TCPConn); ok {
@@ -214,8 +228,14 @@ func (p *relayProxy) handleConn(cli net.Conn) {
 	_ = cli.SetReadDeadline(time.Time{})
 
 	// 2) 拨目标并回 ACK
-	dialer := &net.Dialer{Timeout: p.dialTimeout}
-	dstConn, err := dialer.Dial("tcp", dst)
+	dial := p.dial
+	if dial == nil {
+		dialer := &net.Dialer{Timeout: p.dialTimeout}
+		dial = func(network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		}
+	}
+	dstConn, err := dial("tcp", dst)
 	if err != nil {
 		_, _ = io.WriteString(cli, "ERR\n")
 		return
@@ -233,7 +253,7 @@ func (p *relayProxy) handleConn(cli net.Conn) {
 
 	// 3) 首行之后的缓冲内容先写给目标
 	if br.Buffered() > 0 {
-		if _, err = io.Copy(dstConn, br); err != nil {
+		if _, err = io.CopyN(dstConn, br, int64(br.Buffered())); err != nil {
 			_ = dstConn.Close()
 			return
 		}
@@ -241,16 +261,11 @@ func (p *relayProxy) handleConn(cli net.Conn) {
 
 	// 4) 双向转发
 	defer dstConn.Close()
-	upDone := make(chan struct{}, 1)
-	downDone := make(chan struct{}, 1)
-	go func() { io.Copy(dstConn, cli); upDone <- struct{}{} }()
-	go func() { io.Copy(cli, dstConn); downDone <- struct{}{} }()
-	select {
-	case <-upDone:
-	case <-downDone:
-	}
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(dstConn, cli); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(cli, dstConn); done <- struct{}{} }()
+	<-done
 	_ = dstConn.Close()
-	<-upDone
-	<-downDone
+	_ = cli.Close()
+	<-done
 }
-

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/md5"
 	"encoding/binary"
@@ -9,35 +10,10 @@ import (
 	"io"
 	"net"
 	"os"
-	"path"
-	"runtime"
+	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/cyfdecyf/bufio"
 )
-
-const isWindows = runtime.GOOS == "windows"
-
-type notification chan byte
-
-func newNotification() notification {
-	// Notification channel has size 1, so sending a single one will not block
-	return make(chan byte, 1)
-}
-
-func (n notification) notify() {
-	n <- 1
-}
-
-func (n notification) hasNotified() bool {
-	select {
-	case <-n:
-		return true
-	default:
-		return false
-	}
-}
 
 func ASCIIToUpperInplace(b []byte) {
 	for i := 0; i < len(b); i++ {
@@ -45,18 +21,6 @@ func ASCIIToUpperInplace(b []byte) {
 			b[i] -= 32
 		}
 	}
-}
-
-func ASCIIToUpper(b []byte) []byte {
-	buf := make([]byte, len(b))
-	for i := 0; i < len(b); i++ {
-		if 97 <= b[i] && b[i] <= 122 {
-			buf[i] = b[i] - 32
-		} else {
-			buf[i] = b[i]
-		}
-	}
-	return buf
 }
 
 func ASCIIToLowerInplace(b []byte) {
@@ -112,6 +76,31 @@ func TrimTrailingSpace(s []byte) []byte {
 	for ; end >= 0 && IsSpace(s[end]); end-- {
 	}
 	return s[:end+1]
+}
+
+func writeFull(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
+}
+
+type fullWriter struct {
+	io.Writer
+}
+
+func (w fullWriter) Write(p []byte) (int, error) {
+	if err := writeFull(w.Writer, p); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 // FieldsN is simliar with bytes.Fields, but only consider space and '\t' as
@@ -218,17 +207,6 @@ func isFileExists(path string) error {
 	return nil
 }
 
-func isDirExists(path string) error {
-	stat, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !stat.IsDir() {
-		return fmt.Errorf("%s is not directory", path)
-	}
-	return nil
-}
-
 func getUserHomeDir() string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -240,7 +218,7 @@ func getUserHomeDir() string {
 func expandTilde(pth string) string {
 	if len(pth) > 0 && pth[0] == '~' {
 		home := getUserHomeDir()
-		return path.Join(home, pth[1:])
+		return filepath.Join(home, pth[1:])
 	}
 	return pth
 }
@@ -249,37 +227,30 @@ func expandTilde(pth string) string {
 // rdSize should <= buffer size of the buffered reader.
 // Returns any encountered error.
 func copyN(dst io.Writer, src *bufio.Reader, n, rdSize int) (err error) {
-	// Most of the copy is copied from io.Copy
 	for n > 0 {
-		var b []byte
-		var er error
-		if n > rdSize {
-			b, er = src.ReadN(rdSize)
-		} else {
-			b, er = src.ReadN(n)
+		readSize := n
+		if readSize > rdSize {
+			readSize = rdSize
 		}
+		b, er := src.Peek(readSize)
 		nr := len(b)
-		n -= nr
 		if nr > 0 {
-			nw, ew := dst.Write(b)
-			if ew != nil {
-				err = ew
-				break
+			if err = writeFull(dst, b); err != nil {
+				return err
 			}
-			if nr != nw {
-				err = io.ErrShortWrite
-				break
+			if _, err = src.Discard(nr); err != nil {
+				return err
 			}
+			n -= nr
 		}
 		if er == io.EOF {
-			break
+			return nil
 		}
 		if er != nil {
-			err = er
-			break
+			return er
 		}
 	}
-	return err
+	return nil
 }
 
 func md5sum(ss ...string) string {
@@ -387,8 +358,10 @@ func IgnoreUTF8BOM(f *os.File) error {
 }
 
 // Return all host IP addresses.
+var interfaceAddrs = net.InterfaceAddrs
+
 func hostAddr() (addr []string) {
-	allAddr, err := net.InterfaceAddrs()
+	allAddr, err := interfaceAddrs()
 	if err != nil {
 		Fatal("error getting host address", err)
 	}

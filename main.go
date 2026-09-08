@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"sync"
+	"syscall"
 )
 
 func main() {
@@ -25,12 +28,17 @@ func main() {
 
 	parseConfig(cmdLineConfig.RcFile, cmdLineConfig)
 
-	initSelfListenAddr()
 	initLog()
+	initDomainLists(domainList, config)
+	initSelfListenAddr()
 	initAuth()
 	initStat()
 
-	initParentPool()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	connPool.Start(ctx)
+
+	initParentPool(ctx)
 
 	if config.JudgeByIP {
 		initCNIPData()
@@ -40,12 +48,13 @@ func main() {
 		runtime.GOMAXPROCS(config.Core)
 	}
 
-	go runSSH()
+	go runSSH(ctx)
 
 	var wg sync.WaitGroup
 	wg.Add(len(listenProxy))
 	for _, proxy := range listenProxy {
-		go proxy.Serve(&wg)
+		go proxy.Serve(ctx, &wg)
 	}
 	wg.Wait()
+	connPool.CloseAll()
 }

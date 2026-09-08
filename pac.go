@@ -122,10 +122,8 @@ func genPAC(c *clientConn) []byte {
 	}
 
 	directDomains := ""
-	for k, v := range domainList.Domain {
-		if v == domainTypeDirect {
-			directDomains += k + "\",\n\""
-		}
+	for _, domain := range domainList.GetDomainList() {
+		directDomains += domain + "\",\n\""
 	}
 
 	if directDomains == "" {

@@ -9,8 +9,6 @@ import (
 	"io"
 	"log"
 	"os"
-
-	"github.com/cyfdecyf/color"
 )
 
 type infoLogging bool
@@ -18,6 +16,8 @@ type debugLogging bool
 type errorLogging bool
 type requestLogging bool
 type responseLogging bool
+
+const defaultDebugLogFile = "debug.log"
 
 var (
 	info   infoLogging
@@ -40,7 +40,7 @@ var (
 
 func init() {
 	flag.BoolVar((*bool)(&info), "info", true, "info log")
-	flag.BoolVar((*bool)(&debug), "debug", false, "debug log, with this option, log goes to stdout with color")
+	flag.BoolVar((*bool)(&debug), "debug", false, "debug log; writes to ./debug.log unless logFile is configured")
 	flag.BoolVar((*bool)(&errl), "err", true, "error log")
 	flag.BoolVar((*bool)(&dbgRq), "request", true, "request log")
 	flag.BoolVar((*bool)(&dbgRep), "reply", true, "reply log")
@@ -48,10 +48,27 @@ func init() {
 	flag.BoolVar(&colorize, "color", false, "colorize log output")
 }
 
+func configuredLogFile() string {
+	if config.LogFile != "" {
+		return expandTilde(config.LogFile)
+	}
+	if debug {
+		return defaultDebugLogFile
+	}
+	return ""
+}
+
+func coloredLogPrefix(code, prefix string) string {
+	if !colorize {
+		return prefix
+	}
+	return "\x1b[" + code + "m" + prefix + "\x1b[0m"
+}
+
 func initLog() {
 	logFile = os.Stdout
-	if config.LogFile != "" {
-		if f, err := os.OpenFile(expandTilde(config.LogFile),
+	if logPath := configuredLogFile(); logPath != "" {
+		if f, err := os.OpenFile(logPath,
 			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err != nil {
 			fmt.Printf("Can't open log file, logging to stdout: %v\n", err)
 		} else {
@@ -59,15 +76,10 @@ func initLog() {
 		}
 	}
 	log.SetOutput(logFile)
-	if colorize {
-		color.SetDefaultColor(color.ANSI)
-	} else {
-		color.SetDefaultColor(color.NoColor)
-	}
-	errorLog = log.New(logFile, color.Red("[ERROR] "), log.LstdFlags)
-	debugLog = log.New(logFile, color.Blue("[DEBUG] "), log.LstdFlags)
-	requestLog = log.New(logFile, color.Green("[>>>>>] "), log.LstdFlags)
-	responseLog = log.New(logFile, color.Yellow("[<<<<<] "), log.LstdFlags)
+	errorLog = log.New(logFile, coloredLogPrefix("31", "[ERROR] "), log.LstdFlags)
+	debugLog = log.New(logFile, coloredLogPrefix("34", "[DEBUG] "), log.LstdFlags)
+	requestLog = log.New(logFile, coloredLogPrefix("32", "[>>>>>] "), log.LstdFlags)
+	responseLog = log.New(logFile, coloredLogPrefix("33", "[<<<<<] "), log.LstdFlags)
 }
 
 func (d infoLogging) Printf(format string, args ...interface{}) {

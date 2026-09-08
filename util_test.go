@@ -1,28 +1,32 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"strings"
 	"testing"
-
-	"github.com/cyfdecyf/bufio"
 )
 
-func TestASCIIToUpper(t *testing.T) {
-	testData := []struct {
-		raw   []byte
-		upper []byte
-	}{
-		{[]byte("foobar"), []byte("FOOBAR")},
-		{[]byte("fOoBAr"), []byte("FOOBAR")},
-		{[]byte("..fOoBAr\n"), []byte("..FOOBAR\n")},
+type limitedWriter struct {
+	bytes.Buffer
+	max int
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if len(p) > w.max {
+		p = p[:w.max]
 	}
-	for _, td := range testData {
-		up := ASCIIToUpper(td.raw)
-		if !bytes.Equal(up, td.upper) {
-			t.Errorf("raw: %s, upper: %s\n", td.raw, up)
-		}
+	return w.Buffer.Write(p)
+}
+
+func TestWriteFullHandlesPartialWrites(t *testing.T) {
+	w := &limitedWriter{max: 2}
+	if err := writeFull(w, []byte("complete")); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.String(); got != "complete" {
+		t.Fatalf("writeFull wrote %q", got)
 	}
 }
 

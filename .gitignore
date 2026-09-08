@@ -3,6 +3,10 @@ bin/
 meow-proxy
 MEOW
 MEOW.exe
+MEOW-*.exe
 direct.txt
 rc.txt
 rc-full.txt
+debug.log
+proxy.txt
+reject.txt

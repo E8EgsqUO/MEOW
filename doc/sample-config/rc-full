@@ -140,6 +140,15 @@ listen = http://127.0.0.1:4411
 # 将指定的 HTTP error code 认为是被干扰，使用二级代理重试，默认为空
 #httpErrorCode =
 
+# 建立直连或上游代理连接的最长时间；默认不额外限制
+#dialTimeout = 10s
+
+# HTTP 响应及 SOCKS5 握手的空闲读取超时；每次成功读取后重新计时，默认不额外限制
+#readTimeout = 30s
+
+# HTTPS 上游代理默认校验证书。仅为兼容无法安全维护的旧自签名部署时开启
+#proxyTLSInsecureSkipVerify = false
+
 # 最多允许使用多少个 CPU 核
 #core = 2
 

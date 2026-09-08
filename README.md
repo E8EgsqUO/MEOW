@@ -1,6 +1,6 @@
 # MEOW Proxy
 
-当前版本：1.5 [CHANGELOG](CHANGELOG.md)
+当前版本：1.6.0 [CHANGELOG](CHANGELOG.md)
 [![Build Status](https://travis-ci.org/netheril96/MEOW.png?branch=master)](https://travis-ci.org/netheril96/MEOW)
 
 <pre>
@@ -23,7 +23,30 @@
 
 ## 获取
 
-- **从源码安装:** 安装 [Go](http://golang.org/doc/install)，然后 `go get github.com/netheril96/MEOW`
+- **从源码构建：** 安装 Go 1.26 或更高版本，然后执行：
+
+      git clone https://github.com/E8EgsqUO/MEOW.git
+      cd MEOW
+      go build -trimpath -o meow .
+
+- **运行测试：**
+
+      go test ./...
+      go vet ./...
+      go test -race ./...
+
+- **Windows x64 优化构建：**
+
+      CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+        -trimpath -buildvcs=false -ldflags="-s -w" \
+        -o MEOW-windows-amd64.exe .
+
+  `-s -w` 会移除符号表和 DWARF 调试信息；Go 编译器的正常优化保持开启。
+
+- **Docker：**
+
+      docker build -t meow .
+      docker run --rm -v "$HOME/.meow:/config:ro" meow -rc /config/rc
 
 ## 配置
 
@@ -40,6 +63,9 @@
     # proxy = ss://aes-128-cfb:password@example.server.com:25
     # HTTPS 上级代理
     # proxy = https://user:password@example.server.com:port
+
+    # HTTPS 上游代理默认校验证书；仅为兼容旧的自签名部署时才开启
+    # proxyTLSInsecureSkipVerify = true
 
 ## 工作方式
 

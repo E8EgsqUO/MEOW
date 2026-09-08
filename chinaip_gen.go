@@ -1,4 +1,5 @@
-// +build generate
+//go:build generate
+
 // go run chinaip_gen.go
 
 package main

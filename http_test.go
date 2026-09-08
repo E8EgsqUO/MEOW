@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
-	"github.com/cyfdecyf/bufio"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +27,8 @@ func TestParseRequestURI(t *testing.T) {
 		{"simplehost", &URL{"simplehost:80", "simplehost", "80", "", ""}},
 		{"simplehost:8080", &URL{"simplehost:8080", "simplehost", "8080", "", ""}},
 		{"192.168.1.1:8080/", &URL{"192.168.1.1:8080", "192.168.1.1", "8080", "", "/"}},
+		{"http://[2001:db8::1]/", &URL{"[2001:db8::1]:80", "2001:db8::1", "80", "", "/"}},
+		{"https://[2001:db8::1]:8443/", &URL{"[2001:db8::1]:8443", "2001:db8::1", "8443", "", "/"}},
 		{"/helloworld", &URL{"", "", "", "", "/helloworld"}},
 	}
 	for _, td := range testData {
@@ -58,6 +60,20 @@ func TestParseRequestURI(t *testing.T) {
 		if url.Path != td.url.Path {
 			t.Error(td.rawurl, "parsed path wrong:", td.url.Path, "got", url.Path)
 		}
+	}
+}
+
+func TestParseRequestURIRejectsEmptyInput(t *testing.T) {
+	if _, err := ParseRequestURI(""); err == nil {
+		t.Fatal("empty request URI must be rejected")
+	}
+}
+
+func TestURLParseHostPortIPv6(t *testing.T) {
+	var url URL
+	url.ParseHostPort("[2001:db8::1]")
+	if url.Host != "2001:db8::1" || url.HostPort != "[2001:db8::1]:80" {
+		t.Fatalf("IPv6 host parsed as host=%q hostPort=%q", url.Host, url.HostPort)
 	}
 }
 

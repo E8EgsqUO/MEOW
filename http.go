@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/cyfdecyf/bufio"
 	"net"
 	"strconv"
 	"strings"
@@ -35,6 +35,7 @@ type Header struct {
 	ConnectionKeepAlive bool
 	ExpectContinue      bool
 	Host                string
+	contentLengthSeen   bool
 }
 
 type rqState byte
@@ -60,7 +61,6 @@ type Request struct {
 
 	Header
 	isConnect bool
-	partial   bool // whether contains only partial request data
 	state     rqState
 }
 
@@ -131,10 +131,6 @@ func (r *Request) rawBeforeBody() []byte {
 
 func (r *Request) rawHeaderBody() []byte {
 	return r.raw.Bytes()[r.headStart:]
-}
-
-func (r *Request) rawBody() []byte {
-	return r.raw.Bytes()[r.bodyStart:]
 }
 
 func (r *Request) proxyRequestLine() []byte {
@@ -231,9 +227,9 @@ func (url *URL) ParseHostPort(hostPort string) {
 	if err != nil {
 		// Add default 80 and split again. If there's still error this time,
 		// it's not because lack of port number.
-		host = hostPort
+		host = strings.TrimPrefix(strings.TrimSuffix(hostPort, "]"), "[")
 		port = "80"
-		hostPort = net.JoinHostPort(hostPort, port)
+		hostPort = net.JoinHostPort(host, port)
 	}
 
 	url.Host = host
@@ -251,6 +247,9 @@ func ParseRequestURI(rawurl string) (*URL, error) {
 }
 
 func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
+	if len(rawurl) == 0 {
+		return nil, errors.New("empty request URI")
+	}
 	if rawurl[0] == '/' {
 		return &URL{Path: string(rawurl)}, nil
 	}
@@ -284,7 +283,7 @@ func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
 	// e.g. google.com:80 and google.com:443 should use different connections.
 	host, port, err := net.SplitHostPort(hostport)
 	if err != nil { // missing port
-		host = hostport
+		host = strings.TrimPrefix(strings.TrimSuffix(hostport, "]"), "[")
 		if len(scheme) == 4 {
 			hostport = net.JoinHostPort(host, "80")
 			port = "80"
@@ -294,9 +293,9 @@ func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
 		}
 	}
 
-        // Fixed wechat image url bug, url like http://[::ffff:183.192.196.102]/mmsns/lVxxxxxx
-        host = strings.TrimSuffix(strings.TrimPrefix(host, "[::ffff:"), "]")
-        hostport = net.JoinHostPort(host, port)
+	// Fixed wechat image url bug, url like http://[::ffff:183.192.196.102]/mmsns/lVxxxxxx
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "[::ffff:"), "]")
+	hostport = net.JoinHostPort(host, port)
 	return &URL{hostport, host, port, host2Domain(host), path}, nil
 }
 
@@ -372,8 +371,19 @@ func (h *Header) parseConnection(s []byte) error {
 }
 
 func (h *Header) parseContentLength(s []byte) (err error) {
-	h.ContLen, err = ParseIntFromBytes(s, 10)
-	return err
+	contLen, err := ParseIntFromBytes(s, 10)
+	if err != nil {
+		return err
+	}
+	if contLen < 0 {
+		return errors.New("negative content length")
+	}
+	if h.contentLengthSeen && h.ContLen != contLen {
+		return errors.New("conflicting content length headers")
+	}
+	h.ContLen = contLen
+	h.contentLengthSeen = true
+	return nil
 }
 
 func (h *Header) parseHost(s []byte) (err error) {
@@ -443,11 +453,6 @@ func (h *Header) parseExpect(s []byte) error {
 	ASCIIToLowerInplace(s)
 	errl.Printf("Expect header: %s\n", s) // put here to see if expect header is widely used
 	h.ExpectContinue = true
-	/*
-		if bytes.Contains(s, []byte("100-continue")) {
-			h.ExpectContinue = true
-		}
-	*/
 	return nil
 }
 
@@ -538,10 +543,16 @@ func skipSpace(r *bufio.Reader) int {
 // Only add headers that are of interest for a proxy into request/response's header map.
 func (h *Header) parseHeader(reader *bufio.Reader, raw *bytes.Buffer, url *URL) (err error) {
 	h.ContLen = -1
+	const maxHeaderBytes = 64 << 10
+	totalHeaderBytes := 0
 	for {
 		var line, name, val []byte
 		if line, err = readContinuedLineSlice(reader); err != nil || len(line) == 0 {
 			return
+		}
+		totalHeaderBytes += len(line)
+		if totalHeaderBytes > maxHeaderBytes {
+			return errors.New("HTTP headers too large")
 		}
 		if name, val, err = splitHeader(line); err != nil {
 			errl.Printf("split header %v\nline: %s\nraw header:\n%s\n", err, line, raw.Bytes())
@@ -578,7 +589,6 @@ func parseRequest(c *clientConn, r *Request) (err error) {
 		}
 		return err
 	}
-	c.unsetReadTimeout("parseRequest")
 	// debug.Printf("Request line %s", s)
 
 	r.reset()
@@ -615,6 +625,10 @@ func parseRequest(c *clientConn, r *Request) (err error) {
 	if err = r.parseHeader(reader, r.raw, r.URL); err != nil {
 		errl.Printf("parse request header: %v %s\n%s", err, r, r.Verbose())
 		return err
+	}
+	c.unsetReadTimeout("parseRequest")
+	if r.Chunking && r.contentLengthSeen {
+		return errors.New("request has both Transfer-Encoding and Content-Length")
 	}
 	if r.Chunking {
 		r.raw.WriteString(fullHeaderTransferEncoding)
@@ -670,16 +684,24 @@ func parseResponse(sv *serverConn, r *Request, rp *Response) (err error) {
 		return fmt.Errorf("response status not valid: %s len=%d %v", f[1], len(f[1]), err)
 	}
 	if len(f) == 3 {
-		rp.Reason = f[2]
+		// The status-line slice aliases the reader buffer, which is reused while
+		// parsing headers. Keep the reason stable for logging and HTTP/1.0 rewrite.
+		rp.Reason = append(rp.Reason[:0], f[2]...)
 	}
 
 	proto := f[0]
+	if len(proto) != len("HTTP/1.0") {
+		return fmt.Errorf("invalid response protocol: %s", proto)
+	}
 	if !bytes.Equal(proto[0:7], []byte("HTTP/1.")) {
 		return fmt.Errorf("invalid response status line: %s request %v", string(f[0]), r)
 	}
 	if proto[7] == '1' {
 		rp.raw.Write(s)
 	} else if proto[7] == '0' {
+		// HTTP/1.0 closes by default unless a later Connection header says
+		// keep-alive. Do not return such a connection to the pool by default.
+		rp.ConnectionKeepAlive = false
 		// Should return HTTP version as 1.1 to client since closed connection
 		// will be converted to chunked encoding
 		rp.genStatusLine()
@@ -690,6 +712,9 @@ func parseResponse(sv *serverConn, r *Request, rp *Response) (err error) {
 	if err = rp.parseHeader(reader, rp.raw, r.URL); err != nil {
 		errl.Printf("parse response header: %v %s\n%s", err, r, rp.Verbose())
 		return err
+	}
+	if rp.Chunking && rp.contentLengthSeen {
+		return errors.New("response has both Transfer-Encoding and Content-Length")
 	}
 
 	//Check for http error code from config file

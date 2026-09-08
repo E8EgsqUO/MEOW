@@ -2,21 +2,25 @@ package main
 
 import (
 	"os"
-	"path"
+	"path/filepath"
 )
 
 const (
-	rcFname      = "rc.txt"
-	directFname  = "direct.txt"
-	proxyFname   = "proxy.txt"
-	rejectFname  = "reject.txt"
-	CNIPFname    = "china_ip_list.txt"
+	rcFname     = "rc.txt"
+	directFname = "direct.txt"
+	proxyFname  = "proxy.txt"
+	rejectFname = "reject.txt"
+	CNIPFname   = "china_ip_list.txt"
 
 	newLine = "\r\n"
 )
 
 func getDefaultRcFile() string {
-	// On windows, put the configuration file in the same directory of meow executable
-	// This is not a reliable way to detect binary directory, but it works for double click and run
-	return path.Join(path.Dir(os.Args[0]), rcFname)
+	// On Windows, keep the default configuration beside the executable,
+	// independently of the process working directory or how MEOW was launched.
+	executable, err := os.Executable()
+	if err != nil {
+		executable = os.Args[0]
+	}
+	return filepath.Join(filepath.Dir(executable), rcFname)
 }

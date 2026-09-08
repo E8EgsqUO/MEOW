@@ -1,6 +1,6 @@
 #!/bin/bash
 
-version=1.5
+version=1.6.0
 
 arch=`uname -m`
 case $arch in
@@ -138,4 +138,3 @@ else
     echo "Please edit $config_dir/rc according to your own settings."
     echo 'After that, execute "MEOW &" to start MEOW and run in background.'
 fi
-

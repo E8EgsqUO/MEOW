@@ -1,3 +1,4 @@
+//go:build darwin || freebsd || linux || netbsd || openbsd
 // +build darwin freebsd linux netbsd openbsd
 
 package main
@@ -7,11 +8,11 @@ import (
 )
 
 const (
-	rcFname      = "rc"
-	directFname  = "direct"
-	proxyFname   = "proxy"
-	rejectFname  = "reject"
-	CNIPFname    = "china_ip_list"
+	rcFname     = "rc"
+	directFname = "direct"
+	proxyFname  = "proxy"
+	rejectFname = "reject"
+	CNIPFname   = "china_ip_list"
 
 	newLine = "\n"
 )

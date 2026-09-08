@@ -1,5 +1,6 @@
 package main
-var CNIPDataStart = []uint32 {
+
+var CNIPDataStart = []uint32{
 	16777472,
 	16777728,
 	16779264,
@@ -5451,7 +5452,7 @@ var CNIPDataStart = []uint32 {
 	3758030848,
 	3758091264,
 	3758095360,
-	}
+}
 var CNIPDataNum = []uint{
 	256,
 	512,
@@ -10904,4 +10905,4 @@ var CNIPDataNum = []uint{
 	32768,
 	1024,
 	512,
-	}
+}

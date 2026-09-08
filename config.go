@@ -1,22 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"os"
-	"path"
-	"reflect"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/cyfdecyf/bufio"
 )
 
 const (
-	version           = "1.5"
+	version           = "1.6.0"
 	defaultListenAddr = "127.0.0.1:4411"
 )
 
@@ -45,6 +43,9 @@ type Config struct {
 	// advanced options
 	DialTimeout time.Duration
 	ReadTimeout time.Duration
+	// ProxyTLSInsecureSkipVerify is a compatibility escape hatch for legacy
+	// HTTPS parent proxies with an untrusted certificate.
+	ProxyTLSInsecureSkipVerify bool
 
 	Core int
 
@@ -73,11 +74,11 @@ func printVersion() {
 }
 
 func initConfig(rcFile string) {
-	config.dir = path.Dir(rcFile)
-	config.DirectFile = path.Join(config.dir, directFname)
-	config.ProxyFile = path.Join(config.dir, proxyFname)
-	config.RejectFile = path.Join(config.dir, rejectFname)
-	config.CNIPFile = path.Join(config.dir, CNIPFname)
+	config.dir = filepath.Dir(rcFile)
+	config.DirectFile = filepath.Join(config.dir, directFname)
+	config.ProxyFile = filepath.Join(config.dir, proxyFname)
+	config.RejectFile = filepath.Join(config.dir, rejectFname)
+	config.CNIPFile = filepath.Join(config.dir, CNIPFname)
 
 	config.JudgeByIP = true
 
@@ -111,9 +112,6 @@ func parseCmdLineConfig() *Config {
 		Fatal("fail to get config file:", err)
 	}
 	initConfig(c.RcFile)
-	initDomainList(config.DirectFile, domainTypeDirect)
-	initDomainList(config.ProxyFile, domainTypeProxy)
-	initDomainList(config.RejectFile, domainTypeReject)
 
 	if listenAddr != "" {
 		configParser{}.ParseListen(listenAddr)
@@ -271,7 +269,8 @@ func (pp proxyParser) ProxyMeow(val string) {
 
 // -------------------------------
 func (pp proxyParser) ProxyRelay(val string) {
-	if err := checkServerAddr(val); err != nil {
+	addr, _ := splitAddrParams(val)
+	if err := checkServerAddr(addr); err != nil {
 		Fatal("parent relay server", err)
 	}
 	parentProxy.add(newRelayParent(val))
@@ -284,11 +283,13 @@ func (lp listenParser) ListenRelay(val string, proto string) {
 	if cmdHasListenAddr {
 		return
 	}
-	if err := checkServerAddr(val); err != nil {
+	addr, _ := splitAddrParams(val)
+	if err := checkServerAddr(addr); err != nil {
 		Fatal("listen", proto, "server", err)
 	}
 	addListenProxy(newRelayProxy(val))
 }
+
 // -------------------------------
 func (lp listenParser) ListenHttp(val string, proto string) {
 	if cmdHasListenAddr {
@@ -326,32 +327,42 @@ func (lp listenParser) ListenMeow(val string) {
 // configParser provides functions to parse options in config file.
 type configParser struct{}
 
-func (p configParser) ParseProxy(val string) {
-	parser := reflect.ValueOf(proxyParser{})
-	zeroMethod := reflect.Value{}
+func upperFirst(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
 
+func (p configParser) ParseProxy(val string) {
 	arr := strings.Split(val, "://")
 	if len(arr) != 2 {
 		Fatal("proxy has no protocol specified:", val)
 	}
 	protocol := arr[0]
-
-	methodName := "Proxy" + strings.ToUpper(protocol[0:1]) + protocol[1:]
-	method := parser.MethodByName(methodName)
-	if method == zeroMethod {
+	parser := proxyParser{}
+	switch upperFirst(protocol) {
+	case "Socks5":
+		parser.ProxySocks5(arr[1])
+	case "Http":
+		parser.ProxyHttp(arr[1])
+	case "Https":
+		parser.ProxyHttps(arr[1])
+	case "Ss":
+		parser.ProxySs(arr[1])
+	case "Meow":
+		parser.ProxyMeow(arr[1])
+	case "Relay":
+		parser.ProxyRelay(arr[1])
+	default:
 		Fatalf("no such protocol \"%s\"\n", arr[0])
 	}
-	args := []reflect.Value{reflect.ValueOf(arr[1])}
-	method.Call(args)
 }
 
 func (p configParser) ParseListen(val string) {
 	if cmdHasListenAddr {
 		return
 	}
-
-	parser := reflect.ValueOf(listenParser{})
-	zeroMethod := reflect.Value{}
 
 	var protocol, server string
 	arr := strings.Split(val, "://")
@@ -364,18 +375,16 @@ func (p configParser) ParseListen(val string) {
 		server = arr[1]
 	}
 
-	methodName := "Listen" + strings.ToUpper(protocol[0:1]) + protocol[1:]
-	if methodName == "ListenHttps" {
-		methodName = "ListenHttp"
-	}
-	method := parser.MethodByName(methodName)
-	if method == zeroMethod {
+	parser := listenParser{}
+	switch upperFirst(protocol) {
+	case "Http", "Https":
+		parser.ListenHttp(server, protocol)
+	case "Meow":
+		parser.ListenMeow(server)
+	case "Relay":
+		parser.ListenRelay(server, protocol)
+	default:
 		Fatalf("no such listen protocol \"%s\"\n", arr[0])
-	}
-	if methodName == "ListenMeow" {
-		method.Call([]reflect.Value{reflect.ValueOf(server)})
-	} else {
-		method.Call([]reflect.Value{reflect.ValueOf(server), reflect.ValueOf(protocol)})
 	}
 }
 
@@ -591,6 +600,10 @@ func (p configParser) ParseDialTimeout(val string) {
 	config.DialTimeout = parseDuration(val, "dialTimeout")
 }
 
+func (p configParser) ParseProxyTLSInsecureSkipVerify(val string) {
+	config.ProxyTLSInsecureSkipVerify = parseBool(val, "proxyTLSInsecureSkipVerify")
+}
+
 func (p configParser) ParseJudgeByIP(val string) {
 	config.JudgeByIP = parseBool(val, "judgeByIP")
 }
@@ -601,6 +614,42 @@ func (p configParser) ParseCert(val string) {
 
 func (p configParser) ParseKey(val string) {
 	config.Key = val
+}
+
+type configParseFunc func(configParser, string)
+
+var configParsers = map[string]configParseFunc{
+	"Proxy":                      configParser.ParseProxy,
+	"Listen":                     configParser.ParseListen,
+	"LogFile":                    configParser.ParseLogFile,
+	"AddrInPAC":                  configParser.ParseAddrInPAC,
+	"SocksParent":                configParser.ParseSocksParent,
+	"SshServer":                  configParser.ParseSshServer,
+	"HttpParent":                 configParser.ParseHttpParent,
+	"HttpUserPasswd":             configParser.ParseHttpUserPasswd,
+	"LoadBalance":                configParser.ParseLoadBalance,
+	"DirectFile":                 configParser.ParseDirectFile,
+	"ProxyFile":                  configParser.ParseProxyFile,
+	"ShadowSocks":                configParser.ParseShadowSocks,
+	"ShadowPasswd":               configParser.ParseShadowPasswd,
+	"ShadowMethod":               configParser.ParseShadowMethod,
+	"UserPasswd":                 configParser.ParseUserPasswd,
+	"UserPasswdFile":             configParser.ParseUserPasswdFile,
+	"AllowedClient":              configParser.ParseAllowedClient,
+	"AuthTimeout":                configParser.ParseAuthTimeout,
+	"Core":                       configParser.ParseCore,
+	"HttpErrorCode":              configParser.ParseHttpErrorCode,
+	"ReadTimeout":                configParser.ParseReadTimeout,
+	"DialTimeout":                configParser.ParseDialTimeout,
+	"ProxyTLSInsecureSkipVerify": configParser.ParseProxyTLSInsecureSkipVerify,
+	"JudgeByIP":                  configParser.ParseJudgeByIP,
+	"Cert":                       configParser.ParseCert,
+	"Key":                        configParser.ParseKey,
+}
+
+func findConfigParser(key string) (configParseFunc, bool) {
+	parser, ok := configParsers[upperFirst(key)]
+	return parser, ok
 }
 
 // overrideConfig should contain options from command line to override options
@@ -616,8 +665,6 @@ func parseConfig(rc string, override *Config) {
 
 	scanner := bufio.NewScanner(f)
 
-	parser := reflect.ValueOf(configParser{})
-	zeroMethod := reflect.Value{}
 	var lines []string // store lines for upgrade
 
 	var n int
@@ -636,17 +683,15 @@ func parseConfig(rc string, override *Config) {
 		}
 		key, val := strings.TrimSpace(v[0]), strings.TrimSpace(v[1])
 
-		methodName := "Parse" + strings.ToUpper(key[0:1]) + key[1:]
-		method := parser.MethodByName(methodName)
-		if method == zeroMethod {
+		parse, ok := findConfigParser(key)
+		if !ok {
 			Fatalf("no such option \"%s\"\n", key)
 		}
 		// for backward compatibility, allow empty string in shadowMethod and logFile
 		if val == "" && key != "shadowMethod" && key != "logFile" {
 			Fatalf("empty %s, please comment or remove unused option\n", key)
 		}
-		args := []reflect.Value{reflect.ValueOf(val)}
-		method.Call(args)
+		parse(configParser{}, val)
 	}
 	if scanner.Err() != nil {
 		Fatalf("Error reading rc file: %v\n", scanner.Err())
@@ -725,27 +770,44 @@ func upgradeConfig(rc string, lines []string) {
 }
 
 func overrideConfig(oldconfig, override *Config) {
-	newVal := reflect.ValueOf(override).Elem()
-	oldVal := reflect.ValueOf(oldconfig).Elem()
-
-	// typeOfT := newVal.Type()
-	for i := 0; i < newVal.NumField(); i++ {
-		newField := newVal.Field(i)
-		oldField := oldVal.Field(i)
-		// log.Printf("%d: %s %s = %v\n", i,
-		// typeOfT.Field(i).Name, newField.Type(), newField.Interface())
-		switch newField.Kind() {
-		case reflect.String:
-			s := newField.String()
-			if s != "" {
-				oldField.SetString(s)
-			}
-		case reflect.Int:
-			i := newField.Int()
-			if i != 0 {
-				oldField.SetInt(i)
-			}
-		}
+	if override.RcFile != "" {
+		oldconfig.RcFile = override.RcFile
+	}
+	if override.LogFile != "" {
+		oldconfig.LogFile = override.LogFile
+	}
+	if override.UserPasswd != "" {
+		oldconfig.UserPasswd = override.UserPasswd
+	}
+	if override.UserPasswdFile != "" {
+		oldconfig.UserPasswdFile = override.UserPasswdFile
+	}
+	if override.AllowedClient != "" {
+		oldconfig.AllowedClient = override.AllowedClient
+	}
+	if override.Core != 0 {
+		oldconfig.Core = override.Core
+	}
+	if override.HttpErrorCode != 0 {
+		oldconfig.HttpErrorCode = override.HttpErrorCode
+	}
+	if override.DirectFile != "" {
+		oldconfig.DirectFile = override.DirectFile
+	}
+	if override.ProxyFile != "" {
+		oldconfig.ProxyFile = override.ProxyFile
+	}
+	if override.RejectFile != "" {
+		oldconfig.RejectFile = override.RejectFile
+	}
+	if override.CNIPFile != "" {
+		oldconfig.CNIPFile = override.CNIPFile
+	}
+	if override.Cert != "" {
+		oldconfig.Cert = override.Cert
+	}
+	if override.Key != "" {
+		oldconfig.Key = override.Key
 	}
 }
 

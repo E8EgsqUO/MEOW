@@ -1,11 +1,74 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
-	"github.com/cyfdecyf/bufio"
+	"io"
+	"net"
 	"strings"
 	"testing"
+	"time"
 )
+
+type testNetAddr string
+
+func (a testNetAddr) Network() string { return "test" }
+func (a testNetAddr) String() string  { return string(a) }
+
+type partialWriteConn struct {
+	bytes.Buffer
+	maxWrite int
+}
+
+func (c *partialWriteConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c *partialWriteConn) Close() error                     { return nil }
+func (c *partialWriteConn) LocalAddr() net.Addr              { return testNetAddr("local") }
+func (c *partialWriteConn) RemoteAddr() net.Addr             { return testNetAddr("remote") }
+func (c *partialWriteConn) SetDeadline(time.Time) error      { return nil }
+func (c *partialWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *partialWriteConn) SetWriteDeadline(time.Time) error { return nil }
+func (c *partialWriteConn) Write(p []byte) (int, error) {
+	if len(p) > c.maxWrite {
+		p = p[:c.maxWrite]
+	}
+	return c.Buffer.Write(p)
+}
+
+func TestSendRequestBodyPreservesBytesWithPartialWrites(t *testing.T) {
+	largeBody := strings.Repeat("large request body ", 2048)
+	tests := []struct {
+		name    string
+		body    string
+		chunked bool
+	}{
+		{name: "content-length", body: "small request body"},
+		{name: "large-content-length", body: largeBody},
+		{name: "chunked", body: "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", chunked: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := &partialWriteConn{maxWrite: 3}
+			sv := newServerConn(upstream, "example.com:80")
+			client := &clientConn{
+				Conn:  &partialWriteConn{maxWrite: 3},
+				bufRd: bufio.NewReaderSize(strings.NewReader(test.body), httpBufSize),
+			}
+			request := &Request{
+				URL:    &URL{HostPort: "example.com:80"},
+				Header: Header{Chunking: test.chunked},
+			}
+			if !test.chunked {
+				request.ContLen = int64(len(test.body))
+			}
+			if err := sv.sendRequestBody(request, client); err != nil {
+				t.Fatal(err)
+			}
+			if got := upstream.String(); got != test.body {
+				t.Fatalf("upstream body differs: got %d bytes, want %d", len(got), len(test.body))
+			}
+		})
+	}
+}
 
 func TestSendBodyChunked(t *testing.T) {
 	testData := []struct {
@@ -53,6 +116,12 @@ func TestSendBodyChunked(t *testing.T) {
 }
 
 func TestInitSelfListenAddr(t *testing.T) {
+	originalInterfaceAddrs := interfaceAddrs
+	interfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{testNetAddr("127.0.0.1/8"), testNetAddr("192.168.1.10/24")}, nil
+	}
+	defer func() { interfaceAddrs = originalInterfaceAddrs }()
+
 	listenProxy = []Proxy{newHttpProxy("0.0.0.0:4411", "", "http")}
 	initSelfListenAddr()
 

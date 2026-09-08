@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/cyfdecyf/bufio"
 	"net"
 	"os"
 	"strconv"
@@ -122,13 +122,14 @@ func addUserPasswd(val string) {
 		return
 	}
 	user, au, err := parseUserPasswd(val)
-	debug.Println("user:", user, "port:", au.port)
 	if err != nil {
 		Fatal(err)
 	}
+	debug.Println("user:", user, "port:", au.port)
 	if _, ok := auth.user[user]; ok {
 		Fatal("duplicate user:", user)
 	}
+	au.initHA1(user)
 	auth.user[user] = au
 }
 
@@ -164,7 +165,7 @@ func initAuth() {
 	loadUserPasswdFile(config.UserPasswdFile)
 	parseAllowedClient(config.AllowedClient)
 
-	auth.authed = NewTimeoutSet(time.Duration(config.AuthTimeout) * time.Hour)
+	auth.authed = NewTimeoutSet(config.AuthTimeout)
 
 	rawTemplate := "HTTP/1.1 407 Proxy Authentication Required\r\n" +
 		"Proxy-Authenticate: Digest realm=\"" + authRealm + "\", nonce=\"{{.Nonce}}\", qop=\"auth\"\r\n" +
@@ -292,7 +293,8 @@ func authDigest(conn *clientConn, r *Request, keyVal string) error {
 	}
 	// If nonce time too early, reject. iOS will create a new connection to do
 	// authentication.
-	if time.Now().Sub(time.Unix(nonceTime, 0)) > time.Minute {
+	nonceAge := time.Since(time.Unix(nonceTime, 0))
+	if nonceAge < 0 || nonceAge > time.Minute {
 		return errAuthRequired
 	}
 

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -25,9 +26,19 @@ var connPool = &ConnPool{
 
 const muxConnHostPort = "@muxConn"
 
-func init() {
-	// make sure hostPort here won't match any actual hostPort
-	go closeStaleServerConn(connPool.muxConn, muxConnHostPort)
+func (cp *ConnPool) Start(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cp.closeStale()
+			}
+		}
+	}()
 }
 
 func getConnFromChan(ch chan *serverConn) (sv *serverConn) {
@@ -66,11 +77,10 @@ func (cp *ConnPool) Get(hostPort string, direct bool) (sv *serverConn) {
 	// first to avoid using parent proxy for direct sites.
 	cp.RLock()
 	ch := cp.idleConn[hostPort]
-	cp.RUnlock()
-
 	if ch != nil {
 		sv = getConnFromChan(ch)
 	}
+	cp.RUnlock()
 	if sv != nil {
 		debug.Printf("connPool %s: get conn\n", hostPort)
 		return sv
@@ -90,6 +100,10 @@ func (cp *ConnPool) Get(hostPort string, direct bool) (sv *serverConn) {
 }
 
 func (cp *ConnPool) Put(sv *serverConn) {
+	if sv.mayBeClosed() {
+		sv.Close()
+		return
+	}
 	// Multiplexing connections.
 	switch sv.Conn.(type) {
 	case httpConn, meowConn:
@@ -98,22 +112,15 @@ func (cp *ConnPool) Put(sv *serverConn) {
 	}
 
 	// Site specific connections.
-	cp.RLock()
+	cp.Lock()
 	ch := cp.idleConn[sv.hostPort]
-	cp.RUnlock()
-
 	if ch == nil {
 		debug.Printf("connPool %s: new channel\n", sv.hostPort)
 		ch = make(chan *serverConn, maxServerConnCnt)
-		ch <- sv
-		cp.Lock()
 		cp.idleConn[sv.hostPort] = ch
-		cp.Unlock()
-		// start a new goroutine to close stale server connections
-		go closeStaleServerConn(ch, sv.hostPort)
-	} else {
-		putConnToChan(sv, ch, sv.hostPort)
 	}
+	putConnToChan(sv, ch, sv.hostPort)
+	cp.Unlock()
 }
 
 type chanInPool struct {
@@ -134,13 +141,13 @@ func (cp *ConnPool) CloseAll() {
 	cp.RUnlock()
 
 	for _, hc := range connCh {
-		closeServerConn(hc.ch, hc.hostPort, true)
+		cp.closeServerConn(hc.ch, hc.hostPort, true)
 	}
 
-	closeServerConn(cp.muxConn, muxConnHostPort, true)
+	cp.closeServerConn(cp.muxConn, muxConnHostPort, true)
 }
 
-func closeServerConn(ch chan *serverConn, hostPort string, force bool) (done bool) {
+func (cp *ConnPool) closeServerConn(ch chan *serverConn, hostPort string, force bool) (done bool) {
 	// If force is true, close all idle connection even if it maybe open.
 	lcnt := len(ch)
 	if lcnt == 0 {
@@ -163,9 +170,11 @@ func closeServerConn(ch chan *serverConn, hostPort string, force bool) (done boo
 				// No more connection in this channel, remove the channel from
 				// the map.
 				debug.Printf("connPool channel %s: remove\n", hostPort)
-				connPool.Lock()
-				delete(connPool.idleConn, hostPort)
-				connPool.Unlock()
+				cp.Lock()
+				if cp.idleConn[hostPort] == ch && len(ch) == 0 {
+					delete(cp.idleConn, hostPort)
+				}
+				cp.Unlock()
 			}
 			return true
 		}
@@ -173,36 +182,15 @@ func closeServerConn(ch chan *serverConn, hostPort string, force bool) (done boo
 	return false
 }
 
-func closeStaleServerConn(ch chan *serverConn, hostPort string) {
-	// Tricky here. When removing a channel from the map, there maybe
-	// goroutines doing Put and Get using that channel.
-
-	// For Get, there's no problem because it will return immediately.
-	// For Put, it's possible that a new connection is added to the
-	// channel, but the channel is no longer in the map.
-	// So after removed the channel from the map, we wait for several seconds
-	// and then close all connections left in it.
-
-	// It's possible that Put add the connection after the final wait, but
-	// that should not happen in practice, and the worst result is just lost
-	// some memory and open fd.
-	for {
-		time.Sleep(5 * time.Second)
-		if done := closeServerConn(ch, hostPort, false); done {
-			break
-		}
+func (cp *ConnPool) closeStale() {
+	cp.RLock()
+	channels := make([]chanInPool, 0, len(cp.idleConn))
+	for hostPort, ch := range cp.idleConn {
+		channels = append(channels, chanInPool{hostPort, ch})
 	}
-	// Final wait and then close all left connections. In practice, there
-	// should be no other goroutines holding reference to the channel.
-	time.Sleep(2 * time.Second)
-	for {
-		select {
-		case sv := <-ch:
-			debug.Printf("connPool channel %s: close conn after removed\n", hostPort)
-			sv.Close()
-		default:
-			debug.Printf("connPool channel %s: cleanup done\n", hostPort)
-			return
-		}
+	cp.RUnlock()
+	for _, hc := range channels {
+		cp.closeServerConn(hc.ch, hc.hostPort, false)
 	}
+	cp.closeServerConn(cp.muxConn, muxConnHostPort, false)
 }
