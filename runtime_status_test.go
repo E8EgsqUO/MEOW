@@ -44,7 +44,7 @@ func TestRuntimeStatusRecordsRoutesAndAggregatesErrors(t *testing.T) {
 	recordRuntimeError("blocked.example:443", err)
 	recordRuntimeError("blocked.example:443", err)
 
-	view := snapshotRuntimeStatus()
+	view := snapshotRuntimeStatus("")
 	if view.DirectTotal != 2 || view.ProxyTotal != 2 || len(view.Routes) != 3 {
 		t.Fatalf("unexpected route snapshot: %+v", view)
 	}
@@ -60,7 +60,7 @@ func TestRuntimeStatusTemplateEscapesHostnames(t *testing.T) {
 	resetRuntimeStatusForTest()
 	recordRouteStatus("<script>alert(1)</script>", domainTypeProxy)
 	var out bytes.Buffer
-	if err := runtimeStatusTemplate.Execute(&out, snapshotRuntimeStatus()); err != nil {
+	if err := runtimeStatusTemplate.Execute(&out, snapshotRuntimeStatus("")); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "<script>alert") || !strings.Contains(out.String(), "&lt;script&gt;") {
@@ -83,7 +83,8 @@ func TestRuntimeStatusPageIsServedToLoopback(t *testing.T) {
 	resetRuntimeStatusForTest()
 	conn := &statusTestConn{partialWriteConn: partialWriteConn{maxWrite: 4096}}
 	client := &clientConn{Conn: conn}
-	if err := sendRuntimeStatus(client); err != errPageSent {
+	req := &Request{URL: mustURL(t, "http://127.0.0.1/status")}
+	if err := sendRuntimeStatus(client, req); err != errPageSent {
 		t.Fatalf("status response error = %v", err)
 	}
 	if !bytes.HasPrefix(conn.Bytes(), []byte("HTTP/1.1 200 OK\r\n")) || !bytes.Contains(conn.Bytes(), []byte("MEOW "+version)) {
@@ -99,7 +100,8 @@ func TestRuntimeStatusPageRejectsNonLoopbackClient(t *testing.T) {
 		remote:           testNetAddr("192.0.2.10:12345"),
 	}
 	client := &clientConn{Conn: conn}
-	if err := sendRuntimeStatus(client); err != errPageSent {
+	req := &Request{URL: mustURL(t, "http://192.0.2.10/status")}
+	if err := sendRuntimeStatus(client, req); err != errPageSent {
 		t.Fatalf("status response error = %v", err)
 	}
 	if !bytes.HasPrefix(conn.Bytes(), []byte("HTTP/1.1 403 Forbidden\r\n")) {

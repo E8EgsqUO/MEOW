@@ -446,15 +446,16 @@ func (h *Header) parseTrailer(s []byte) error {
 	return nil
 }
 
-// For now, meow does not fully support 100-continue. It will return "417
-// expectation failed" if a request contains expect header. This is one of the
-// strategies supported by polipo, which is easiest to implement in meow.
-// TODO If we see lots of expect 100-continue usage, provide full support.
+// meow relays "Expect: 100-continue" to the origin server: the Expect header is
+// forwarded unchanged, and the request body is held back until the origin
+// answers with 100 (relayed to the client) or a final response (relayed
+// instead, after which the connection is closed). See relayExpectContinue.
 
 func (h *Header) parseExpect(s []byte) error {
 	ASCIIToLowerInplace(s)
-	errl.Printf("Expect header: %s\n", s) // put here to see if expect header is widely used
-	h.ExpectContinue = true
+	if bytes.Contains(s, []byte("100-continue")) {
+		h.ExpectContinue = true
+	}
 	return nil
 }
 

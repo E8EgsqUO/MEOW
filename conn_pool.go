@@ -123,6 +123,19 @@ func (cp *ConnPool) Put(sv *serverConn) {
 	cp.Unlock()
 }
 
+// stats reports how many idle server connections the pool is holding, for the
+// local /status page.
+func (cp *ConnPool) stats() (sites, siteConns, muxConns int) {
+	cp.RLock()
+	defer cp.RUnlock()
+	sites = len(cp.idleConn)
+	for _, ch := range cp.idleConn {
+		siteConns += len(ch)
+	}
+	muxConns = len(cp.muxConn)
+	return
+}
+
 type chanInPool struct {
 	hostPort string
 	ch       chan *serverConn

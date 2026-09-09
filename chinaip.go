@@ -4,12 +4,33 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
+	_ "embed"
 	"encoding/binary"
 	"net/netip"
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 )
+
+// The built-in China IP table is stored gzip-compressed (~30 KB vs ~170 KB of
+// Go source) so a CI regeneration is a single-line diff instead of thousands.
+//
+//go:embed chinaip_cn.txt.gz
+var cnIPCompressed []byte
+
+// builtinCNPrefixes decompresses and parses the embedded China IP table.
+func builtinCNPrefixes() []netip.Prefix {
+	gz, err := gzip.NewReader(bytes.NewReader(cnIPCompressed))
+	if err != nil {
+		errl.Printf("built-in China IP data unreadable: %v", err)
+		return nil
+	}
+	defer gz.Close()
+	return parsePrefixList(bufio.NewScanner(gz), "built-in China IP data")
+}
 
 // ipRange is a closed address interval. Prefixes are normalised into ranges so
 // that overlapping or adjacent entries -- common in hand-maintained lists --
@@ -156,27 +177,28 @@ func parsePrefixList(r *bufio.Scanner, origin string) []netip.Prefix {
 	return out
 }
 
-func parsePrefixString(data, origin string) []netip.Prefix {
-	return parsePrefixList(bufio.NewScanner(strings.NewReader(data)), origin)
-}
-
 // cnIPSet holds the China address ranges consulted by the IP based routing
 // decision. It stays empty until initCNIPData runs, which makes every address
 // look foreign; that is the safe direction, since a foreign verdict routes
 // through the parent proxy instead of failing on a blocked direct connection.
-var cnIPSet = &ipRangeSet{}
+// It is an atomic pointer so a runtime reload (see /status) can swap the table
+// without racing the routing lookups that read it.
+var cnIPSet atomic.Pointer[ipRangeSet]
+
+func init() { cnIPSet.Store(&ipRangeSet{}) }
+
+// currentCNIPSet returns the China IP table in effect.
+func currentCNIPSet() *ipRangeSet { return cnIPSet.Load() }
 
 func initCNIPData() {
 	if set := loadCNIPFile(config.CNIPFile); set != nil {
-		cnIPSet = set
+		cnIPSet.Store(set)
 		return
 	}
-	cnIPSet = newIPRangeSet(append(
-		parsePrefixString(cnIPv4Data, "built-in China IPv4 data"),
-		parsePrefixString(cnIPv6Data, "built-in China IPv6 data")...,
-	))
+	set := newIPRangeSet(builtinCNPrefixes())
+	cnIPSet.Store(set)
 	debug.Printf("loaded built-in China IP data (%s, generated %s): %d IPv4 ranges, %d IPv6 ranges",
-		cnIPDataSource, cnIPDataGenerated, len(cnIPSet.v4), len(cnIPSet.v6))
+		cnIPDataSource, cnIPDataGenerated, len(set.v4), len(set.v6))
 }
 
 // loadCNIPFile returns the user supplied China IP set, or nil to fall back to

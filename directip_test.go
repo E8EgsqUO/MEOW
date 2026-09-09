@@ -67,8 +67,17 @@ func TestIPShouldDirect(t *testing.T) {
 func TestCNIPPrefixBoundaries(t *testing.T) {
 	initCNIPData()
 
-	check := func(name string, data string) {
-		prefixes := parsePrefixString(data, name)
+	all := builtinCNPrefixes()
+	var v4, v6 []netip.Prefix
+	for _, p := range all {
+		if p.Addr().Is4() {
+			v4 = append(v4, p)
+		} else {
+			v6 = append(v6, p)
+		}
+	}
+
+	check := func(name string, prefixes []netip.Prefix) {
 		if len(prefixes) == 0 {
 			t.Fatalf("%s: no prefixes parsed", name)
 		}
@@ -85,14 +94,14 @@ func TestCNIPPrefixBoundaries(t *testing.T) {
 			// Only meaningful where the merged set really ends, otherwise the
 			// next address legitimately belongs to an adjacent range.
 			if past := last.Next(); past.IsValid() && !set.contains(past) {
-				if cnIPSet.contains(past) != set.contains(past) {
+				if currentCNIPSet().contains(past) != set.contains(past) {
 					t.Errorf("%s %s: disagreement past the end at %s", name, p, past)
 				}
 			}
 		}
 	}
-	check("IPv4", cnIPv4Data)
-	check("IPv6", cnIPv6Data)
+	check("IPv4", v4)
+	check("IPv6", v6)
 }
 
 // TestIPRangeSetExcludesGaps builds a set with a deliberate hole and checks the

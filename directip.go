@@ -65,7 +65,7 @@ func addrShouldDirect(addr netip.Addr, policy IPv6Policy) bool {
 			return false
 		}
 	}
-	return cnIPSet.contains(addr)
+	return currentCNIPSet().contains(addr)
 }
 
 func ipShouldDirect(ip string, policy IPv6Policy) bool {

@@ -232,6 +232,39 @@ func (domainList *DomainList) add(host string, domainType DomainType) {
 	domainList.learned[host] = domainType
 }
 
+// forget drops a single learned verdict so the host is judged afresh on its
+// next request. Reports whether the host was actually cached.
+func (domainList *DomainList) forget(host string) bool {
+	host = canonicalHost(host)
+	domainList.Lock()
+	defer domainList.Unlock()
+	if _, ok := domainList.learned[host]; !ok {
+		return false
+	}
+	delete(domainList.learned, host)
+	return true
+}
+
+// learnedCount reports how many runtime verdicts are cached.
+func (domainList *DomainList) learnedCount() int {
+	domainList.RLock()
+	defer domainList.RUnlock()
+	return len(domainList.learned)
+}
+
+// reload rebuilds the configured rules from disk and drops every learned
+// verdict. Triggered from the local /status page.
+func (domainList *DomainList) reload(config Config) {
+	fresh := map[string]DomainType{}
+	loadDomainRules(fresh, config.DirectFile, domainTypeDirect)
+	loadDomainRules(fresh, config.ProxyFile, domainTypeProxy)
+	loadDomainRules(fresh, config.RejectFile, domainTypeReject)
+	domainList.Lock()
+	domainList.Domain = fresh
+	domainList.learned = map[string]DomainType{}
+	domainList.Unlock()
+}
+
 // GetDomainList returns configured direct rules for PAC's suffix matching.
 // Learned hosts stay behind MEOW so they cannot become subdomain-wide PAC rules.
 func (domainList *DomainList) GetDomainList() []string {
@@ -257,8 +290,15 @@ func initDomainLists(domainList *DomainList, config Config) {
 }
 
 func initDomainList(domainList *DomainList, domainListFile string, domainType DomainType) {
-	var err error
-	if err = isFileExists(domainListFile); err != nil {
+	domainList.Lock()
+	defer domainList.Unlock()
+	loadDomainRules(domainList.Domain, domainListFile, domainType)
+}
+
+// loadDomainRules reads one routing rules file into dst. It never aborts on a
+// read error: a missing or unreadable list must not stop the proxy.
+func loadDomainRules(dst map[string]DomainType, domainListFile string, domainType DomainType) {
+	if err := isFileExists(domainListFile); err != nil {
 		debug.Printf("routing rules file unavailable: %s: %v", domainListFile, err)
 		return
 	}
@@ -269,8 +309,6 @@ func initDomainList(domainList *DomainList, domainListFile string, domainType Do
 	}
 	defer f.Close()
 
-	domainList.Lock()
-	defer domainList.Unlock()
 	loaded := 0
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -278,7 +316,7 @@ func initDomainList(domainList *DomainList, domainListFile string, domainType Do
 		if domain == "" {
 			continue
 		}
-		domainList.Domain[domain] = domainType
+		dst[domain] = domainType
 		loaded++
 	}
 	if scanner.Err() != nil {

@@ -27,7 +27,8 @@ jobs:
           title: "Update China IP data from APNIC"
           commit-message: "Update China IP data from APNIC"
           body: |
-            Regenerated `chinaip_data.go` from the APNIC delegation statistics.
+            Regenerated `chinaip_cn.txt.gz` (and `chinaip_meta.go`) from the
+            APNIC delegation statistics.
 
             The routing tests ran as part of the regeneration, so a truncated
             or scrambled download will have failed the job rather than landed

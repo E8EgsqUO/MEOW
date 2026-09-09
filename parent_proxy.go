@@ -142,6 +142,46 @@ func confirmsParentAvailable(err error) bool {
 	return errors.As(err, &replyErr)
 }
 
+// parentProxyStatus is one parent proxy's health, for the local /status page.
+type parentProxyStatus struct {
+	Server string
+	Detail string
+}
+
+func parentProxyStatuses() []parentProxyStatus {
+	switch pp := parentProxy.(type) {
+	case *latencyParentPool:
+		latencyMutex.RLock()
+		defer latencyMutex.RUnlock()
+		out := make([]parentProxyStatus, 0, len(pp.parent))
+		for _, p := range pp.parent {
+			detail := "latency " + p.latency.Round(time.Millisecond).String()
+			if p.latency >= latencyMax {
+				detail = "unreachable"
+			}
+			out = append(out, parentProxyStatus{p.getServer(), detail})
+		}
+		return out
+	case *hashParentPool:
+		return failPoolStatuses(pp.parent)
+	case *backupParentPool:
+		return failPoolStatuses(pp.parent)
+	}
+	return nil
+}
+
+func failPoolStatuses(parents []ParentWithFail) []parentProxyStatus {
+	out := make([]parentProxyStatus, 0, len(parents))
+	for i := range parents {
+		detail := "ok"
+		if fail := atomic.LoadInt32(&parents[i].fail); fail > 0 {
+			detail = fmt.Sprintf("%d recent failures", fail)
+		}
+		out = append(out, parentProxyStatus{parents[i].getServer(), detail})
+	}
+	return out
+}
+
 // Backup load balance strategy:
 // Select proxy in the order they appear in config.
 type backupParentPool struct {

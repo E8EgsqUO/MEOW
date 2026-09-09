@@ -249,6 +249,13 @@ func copyN(dst io.Writer, src *bufio.Reader, n int64, rdSize int) (err error) {
 			}
 			n -= int64(nr)
 		}
+		if n == 0 {
+			// All requested bytes copied. A bufio.Reader can surface EOF
+			// together with the final bytes (TLS records, bytes.Reader, a
+			// server that closes right after the last byte); that is a clean
+			// end of a fixed-length body, not a truncation.
+			return nil
+		}
 		if er == io.EOF {
 			return io.ErrUnexpectedEOF
 		}
