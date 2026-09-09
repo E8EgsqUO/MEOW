@@ -1,0 +1,47 @@
+# systemd unit for MEOW, replacing the old SysV init script.
+#
+#   sudo cp MEOW /usr/local/bin/
+#   sudo cp doc/meow.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now meow
+#
+# Adjust User= and the rc path to match your setup. MEOW looks for its
+# direct/proxy/reject files in the same directory as the rc file.
+
+[Unit]
+Description=MEOW Proxy
+Documentation=https://github.com/E8EgsqUO/MEOW
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+ExecStart=/usr/local/bin/MEOW -rc /etc/meow/rc
+Restart=on-failure
+RestartSec=5s
+
+# A busy proxy holds a lot of sockets; the default limit is easy to hit.
+LimitNOFILE=20480
+
+# MEOW only needs to read its config and open sockets.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadOnlyPaths=/etc/meow
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,6 @@
 # MEOW Proxy
 
 当前版本：1.7.0 [CHANGELOG](CHANGELOG.md)
-[![Build Status](https://travis-ci.org/netheril96/MEOW.png?branch=master)](https://travis-ci.org/netheril96/MEOW)
 
 <pre>
        /\
@@ -35,7 +34,12 @@
       go vet ./...
       go test -race ./...
 
-- **Windows x64 优化构建：**
+- **交叉编译所有平台：** 一次产出 Linux（amd64 / arm64 / armv7）、macOS（arm64 /
+  amd64）和 Windows（amd64 / arm64）的可执行文件：
+
+      ./script/build-release.sh
+
+  单独构建某个平台，例如 Windows x64：
 
       CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
         -trimpath -buildvcs=false -ldflags="-s -w" \
@@ -47,6 +51,14 @@
 
       docker build -t meow .
       docker run --rm -v "$HOME/.meow:/config:ro" meow -rc /config/rc
+
+## 开机自启
+
+- **Linux (systemd)：** 参考 [doc/meow.service](doc/meow.service)，文件开头有安装步骤
+- **macOS (launchd)：** 参考 [doc/osx/net.ohrz.meow.plist](doc/osx/net.ohrz.meow.plist)，
+  把其中的 `MEOWBINARY` 换成可执行文件的绝对路径，放进 `~/Library/LaunchAgents/`
+- **Windows：** `script/meow-taskbar.exe` 是一个托盘启动器，与 `MEOW.exe` 放在同一
+  目录即可，详见 [script/README.md](script/README.md)
 
 ## 配置
 
