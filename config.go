@@ -117,6 +117,12 @@ func parseCmdLineConfig() *Config {
 
 	flag.Parse()
 
+	// -version must answer on a machine that has no config file yet, which is
+	// exactly the machine someone checks a fresh binary on.
+	if c.PrintVer {
+		return &c
+	}
+
 	if c.RcFile == "" {
 		c.RcFile = getDefaultRcFile()
 	} else {

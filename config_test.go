@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -165,5 +167,24 @@ func TestRcCoreSurvivesCmdlineDefault(t *testing.T) {
 	overrideConfig(&fromRc, &Config{Core: 1})
 	if fromRc.Core != 1 {
 		t.Errorf("core = %d, want 1: an explicit -core must still win", fromRc.Core)
+	}
+}
+
+// -version used to die on "fail to get config file" before it ever printed
+// anything, which is the wrong answer on a machine where MEOW is not set up.
+func TestPrintVersionNeedsNoConfigFile(t *testing.T) {
+	savedArgs, savedFlags := os.Args, flag.CommandLine
+	savedConfig := config
+	t.Cleanup(func() {
+		os.Args, flag.CommandLine = savedArgs, savedFlags
+		config = savedConfig
+	})
+
+	os.Args = []string{"meow", "-version", "-rc", filepath.Join(t.TempDir(), "does-not-exist")}
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+
+	c := parseCmdLineConfig()
+	if !c.PrintVer {
+		t.Fatal("PrintVer not set")
 	}
 }
