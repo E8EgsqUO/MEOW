@@ -150,3 +150,20 @@ func TestIPv6PolicyDefaultsToJudge(t *testing.T) {
 		t.Errorf("default IPv6Policy = %v, want judge", config.IPv6Policy)
 	}
 }
+
+// The -core flag used to default to 2 rather than 0. Because overrideConfig
+// treats any non-zero command line value as an explicit override, that default
+// beat the rc file and pinned every run to two cores.
+func TestRcCoreSurvivesCmdlineDefault(t *testing.T) {
+	fromRc := Config{Core: 4}
+	overrideConfig(&fromRc, &Config{})
+	if fromRc.Core != 4 {
+		t.Errorf("rc core = %d, want 4: the command line default discarded it", fromRc.Core)
+	}
+
+	fromRc = Config{Core: 4}
+	overrideConfig(&fromRc, &Config{Core: 1})
+	if fromRc.Core != 1 {
+		t.Errorf("core = %d, want 1: an explicit -core must still win", fromRc.Core)
+	}
+}

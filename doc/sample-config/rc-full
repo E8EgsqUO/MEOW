@@ -156,7 +156,7 @@ listen = http://127.0.0.1:4411
 #   proxy  IPv6 一律不走直连
 #ipv6Policy = judge
 
-# 最多允许使用多少个 CPU 核
+# 最多允许使用多少个 CPU 核。不设置则使用全部核心
 #core = 2
 
 # 修改 direct/proxy 文件路径，如不指定，默认在配置文件所在目录下

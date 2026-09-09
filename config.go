@@ -98,7 +98,7 @@ func parseCmdLineConfig() *Config {
 	flag.StringVar(&c.RcFile, "rc", "", "config file, defaults to $HOME/.meow/rc on Unix, ./rc.txt on Windows")
 	// Specifying listen default value to StringVar would override config file options
 	flag.StringVar(&listenAddr, "listen", "", "listen address, disables listen in config")
-	flag.IntVar(&c.Core, "core", 2, "number of cores to use")
+	flag.IntVar(&c.Core, "core", 0, "number of cores to use, 0 means all of them")
 	flag.StringVar(&c.LogFile, "logFile", "", "write output to file")
 	flag.BoolVar(&c.PrintVer, "version", false, "print version")
 	flag.StringVar(&c.Cert, "cert", "", "cert for local https proxy")
