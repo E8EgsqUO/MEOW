@@ -12,3 +12,4 @@ debug.log
 debug.txt
 proxy.txt
 reject.txt
+.fuse_hidden*
