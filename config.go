@@ -31,8 +31,11 @@ type Config struct {
 	LogFile   string // path for log file
 	JudgeByIP bool
 	// IPv6Policy selects how IPv6 answers take part in routing decisions.
-	IPv6Policy  IPv6Policy
-	LoadBalance LoadBalanceMode // select load balance mode
+	IPv6Policy IPv6Policy
+	// DirectFallback retries a failed direct connection through the parent
+	// proxy, and remembers the host as needing the proxy when that works.
+	DirectFallback bool
+	LoadBalance    LoadBalanceMode // select load balance mode
 
 	SshServer []string
 
@@ -84,6 +87,7 @@ func initConfig(rcFile string) {
 
 	config.JudgeByIP = true
 	config.IPv6Policy = ipv6PolicyJudge
+	config.DirectFallback = true
 
 	config.AuthTimeout = 2 * time.Hour
 }
@@ -611,6 +615,10 @@ func (p configParser) ParseJudgeByIP(val string) {
 	config.JudgeByIP = parseBool(val, "judgeByIP")
 }
 
+func (p configParser) ParseDirectFallback(val string) {
+	config.DirectFallback = parseBool(val, "directFallback")
+}
+
 func (p configParser) ParseIPv6Policy(val string) {
 	switch strings.ToLower(val) {
 	case "judge":
@@ -660,6 +668,7 @@ var configParsers = map[string]configParseFunc{
 	"ProxyTLSInsecureSkipVerify": configParser.ParseProxyTLSInsecureSkipVerify,
 	"JudgeByIP":                  configParser.ParseJudgeByIP,
 	"Ipv6Policy":                 configParser.ParseIPv6Policy,
+	"DirectFallback":             configParser.ParseDirectFallback,
 	"Cert":                       configParser.ParseCert,
 	"Key":                        configParser.ParseKey,
 }
