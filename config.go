@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version           = "1.7.2"
+	version           = "1.7.3"
 	defaultListenAddr = "127.0.0.1:4411"
 )
 
@@ -70,6 +70,10 @@ type Config struct {
 
 	// not configurable in config file
 	PrintVer bool
+	// CheckConfig parses the configuration, reports any problem and exits
+	// without starting the proxy. Used by the /status reload to validate a
+	// changed rc file in a child process before re-executing.
+	CheckConfig bool
 
 	// not config option
 	saveReqLine bool // for http and meow parent, should save request line from client
@@ -79,6 +83,7 @@ type Config struct {
 
 var config Config
 var configNeedUpgrade bool // whether should upgrade config file
+var checkConfigOnly bool   // -check-config: validate and exit, never rewrite rc
 
 func printVersion() {
 	fmt.Println("MEOW version", version)
@@ -112,6 +117,7 @@ func parseCmdLineConfig() *Config {
 	flag.IntVar(&c.Core, "core", 0, "number of cores to use, 0 means all of them")
 	flag.StringVar(&c.LogFile, "logFile", "", "write output to file")
 	flag.BoolVar(&c.PrintVer, "version", false, "print version")
+	flag.BoolVar(&c.CheckConfig, "check-config", false, "parse the config file, report any problem, and exit")
 	flag.StringVar(&c.Cert, "cert", "", "cert for local https proxy")
 	flag.StringVar(&c.Key, "key", "", "key for local https proxy")
 
@@ -122,6 +128,7 @@ func parseCmdLineConfig() *Config {
 	if c.PrintVer {
 		return &c
 	}
+	checkConfigOnly = c.CheckConfig
 
 	if c.RcFile == "" {
 		c.RcFile = getDefaultRcFile()
@@ -759,10 +766,12 @@ func parseConfig(rc string, override *Config) {
 	}
 	f.Close()
 
+	rcStartupSig = fileSignature(expandTilde(rc))
+
 	overrideConfig(&config, override)
 	checkConfig()
 
-	if configNeedUpgrade {
+	if configNeedUpgrade && !checkConfigOnly {
 		upgradeConfig(rc, lines)
 	}
 }

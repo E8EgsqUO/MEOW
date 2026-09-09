@@ -184,12 +184,12 @@ var runtimeStatusTemplate = template.Must(template.New("status").Funcs(template.
 body{font:14px system-ui,sans-serif;margin:24px;color:#222} table{border-collapse:collapse;width:100%;max-width:1100px}
 th,td{padding:6px 9px;border-bottom:1px solid #ddd;text-align:left} code{font-family:ui-monospace,monospace}
 .direct{color:#16803a}.proxy{color:#2257c7}.reject{color:#b42318}.muted{color:#666} h2{margin-top:24px}
-a{color:#2257c7} .notice{background:#eef6ff;border:1px solid #cfe2ff;padding:8px 12px;border-radius:6px;max-width:1076px}
+a{color:#2257c7} .notice{background:#eef6ff;border:1px solid #cfe2ff;padding:8px 12px;border-radius:6px;max-width:1076px;white-space:pre-wrap}
 </style></head><body><h1>MEOW {{.Version}}</h1>
 {{if .Notice}}<p class="notice">{{.Notice}}</p>{{end}}
 <p>运行 {{.Uptime}} · DIRECT {{.DirectTotal}} · PROXY {{.ProxyTotal}} · REJECT {{.RejectTotal}} · 请求/响应日志 {{.RequestLog}}/{{.ReplyLog}}</p>
 <p class="muted">goroutine {{.Goroutines}} · 已学习分流 {{.LearnedRules}} 条 · 连接池 {{.PoolSites}} 站点/{{.PoolConns}} 直连空闲/{{.PoolMuxConns}} 复用空闲</p>
-<p><a href="/status/reload">重新加载 direct/proxy/reject 及中国 IP 列表（并清空已学习分流）</a></p>
+<p><a href="/status/reload" onclick="return confirm('将校验并重新加载全部配置。rc 有改动时 MEOW 会重启，当前连接短暂中断。继续？')">重新加载全部配置</a>（规则文件就地重载；rc 有改动则校验通过后重启）</p>
 <p class="muted">每 5 秒自动刷新；只保留最近 256 条分流和 64 类上游错误。</p>
 {{if .Parents}}<h2>父代理</h2><table><tr><th>服务器</th><th>状态</th></tr>
 {{range .Parents}}<tr><td><code>{{.Server}}</code></td><td>{{.Detail}}</td></tr>{{end}}</table>{{end}}
@@ -245,12 +245,28 @@ func statusForget(rawQuery string) string {
 }
 
 func statusReload() string {
+	// Rule files are reloaded in-process: they are simple and side-effect free.
 	domainList.reload(config)
 	if config.JudgeByIP {
 		initCNIPData()
 	}
 	info.Println("status: reloaded routing lists and cleared learned routes")
-	return "已重新加载 direct/proxy/reject 及中国 IP 列表，并清空全部自动学习结果"
+
+	// rc itself cannot be applied in place (listeners, parent pool and auth are
+	// wired up once at startup). Only restart when it actually changed.
+	if fileSignature(config.RcFile) == rcStartupSig {
+		return "已重新加载 direct/proxy/reject 及中国 IP 列表，并清空全部自动学习结果。\nrc 未改动，无需重启。"
+	}
+	// Validate the changed rc in a child process. If it is broken, say where
+	// and keep serving the old configuration; if it is sound, restart.
+	if msg := validateOnDiskConfig(); msg != "" {
+		return "规则文件已重新加载。rc 有改动但存在错误，未生效（继续使用当前配置）：\n" + msg
+	}
+	applyValidatedReload()
+	if reloadEndsProcess() {
+		return "rc 校验通过。MEOW 即将退出，请重新启动以使更改生效。"
+	}
+	return "rc 校验通过，MEOW 正在用新配置重启，当前连接会短暂中断（约 1 秒）。"
 }
 
 func renderRuntimeStatus(c *clientConn, notice string) error {

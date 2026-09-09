@@ -11,15 +11,19 @@ import (
 )
 
 func main() {
-	releaseInstance, acquired, err := acquirePlatformInstance()
-	if err != nil {
-		Fatal("failed to initialize platform runtime:", err)
+	// A -check-config run is a short-lived child of a running instance; it must
+	// not contend for the single-instance guard or touch the startup-error log.
+	if !isConfigCheckRun() {
+		releaseInstance, acquired, err := acquirePlatformInstance()
+		if err != nil {
+			Fatal("failed to initialize platform runtime:", err)
+		}
+		if !acquired {
+			return
+		}
+		defer releaseInstance()
+		clearStartupError()
 	}
-	if !acquired {
-		return
-	}
-	defer releaseInstance()
-	clearStartupError()
 
 	// Parse flags after load config to allow override options in config
 	cmdLineConfig := parseCmdLineConfig()
@@ -28,15 +32,23 @@ func main() {
 		os.Exit(0)
 	}
 
-	fmt.Printf(`
+	if !cmdLineConfig.CheckConfig {
+		fmt.Printf(`
        /\
    )  ( ')     MEOW Proxy %s
   (  /  )      http://renzhn.github.io/MEOW/
-   \(__)|      
+   \(__)|
 	`, version)
-	fmt.Println()
+		fmt.Println()
+	}
 
 	parseConfig(cmdLineConfig.RcFile, cmdLineConfig)
+
+	if cmdLineConfig.CheckConfig {
+		validateConfigForReload()
+		fmt.Println("config OK")
+		os.Exit(0)
+	}
 
 	initLog()
 	initDomainLists(domainList, config)
