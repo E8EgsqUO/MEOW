@@ -1,4 +1,9 @@
 ## 更新说明
+- 2026-09-09 Version 1.6.1
+
+       * 修正 meow 协议连接写入返回值不符合 io.Writer 约定导致的崩溃与响应体丢失
+       * writeFull 遇到异常的 io.Writer 返回错误而非 panic
+
 - 2026-09-08 Version 1.6.0
 
        * 更新 Go 工具链、依赖、CI 和跨平台构建

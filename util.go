@@ -78,6 +78,10 @@ func TrimTrailingSpace(s []byte) []byte {
 	return s[:end+1]
 }
 
+// errInvalidWrite is returned when an io.Writer violates the interface
+// contract by reporting more bytes written than it was given.
+var errInvalidWrite = errors.New("invalid write result")
+
 func writeFull(w io.Writer, p []byte) error {
 	for len(p) > 0 {
 		n, err := w.Write(p)
@@ -86,6 +90,9 @@ func writeFull(w io.Writer, p []byte) error {
 		}
 		if n == 0 {
 			return io.ErrShortWrite
+		}
+		if n < 0 || n > len(p) {
+			return errInvalidWrite
 		}
 		p = p[n:]
 	}

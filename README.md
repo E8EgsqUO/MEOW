@@ -1,6 +1,6 @@
 # MEOW Proxy
 
-当前版本：1.6.0 [CHANGELOG](CHANGELOG.md)
+当前版本：1.6.1 [CHANGELOG](CHANGELOG.md)
 [![Build Status](https://travis-ci.org/netheril96/MEOW.png?branch=master)](https://travis-ci.org/netheril96/MEOW)
 
 <pre>
