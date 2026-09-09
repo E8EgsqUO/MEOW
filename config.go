@@ -35,7 +35,13 @@ type Config struct {
 	// DirectFallback retries a failed direct connection through the parent
 	// proxy, and remembers the host as needing the proxy when that works.
 	DirectFallback bool
-	LoadBalance    LoadBalanceMode // select load balance mode
+	// DNSServer is a resolver reachable over a path that interference cannot
+	// forge replies on, consulted to confirm a routing verdict. Empty means
+	// the local resolver decides alone.
+	DNSServer string
+	// DNSVerify selects which local verdicts DNSServer is asked to confirm.
+	DNSVerify   dnsVerifyPolicy
+	LoadBalance LoadBalanceMode // select load balance mode
 
 	SshServer []string
 
@@ -88,6 +94,7 @@ func initConfig(rcFile string) {
 	config.JudgeByIP = true
 	config.IPv6Policy = ipv6PolicyJudge
 	config.DirectFallback = true
+	config.DNSVerify = dnsVerifyDomestic
 
 	config.AuthTimeout = 2 * time.Hour
 }
@@ -615,6 +622,26 @@ func (p configParser) ParseJudgeByIP(val string) {
 	config.JudgeByIP = parseBool(val, "judgeByIP")
 }
 
+func (p configParser) ParseDNSServer(val string) {
+	if _, err := parseDNSServer(val); err != nil {
+		Fatalf("dnsServer %s: %v\n", val, err)
+	}
+	config.DNSServer = strings.TrimSpace(val)
+}
+
+func (p configParser) ParseDNSVerify(val string) {
+	switch strings.ToLower(val) {
+	case "domestic":
+		config.DNSVerify = dnsVerifyDomestic
+	case "foreign":
+		config.DNSVerify = dnsVerifyForeign
+	case "off":
+		config.DNSVerify = dnsVerifyOff
+	default:
+		Fatalf("dnsVerify %s not supported, must be one of domestic, foreign, off\n", val)
+	}
+}
+
 func (p configParser) ParseDirectFallback(val string) {
 	config.DirectFallback = parseBool(val, "directFallback")
 }
@@ -669,6 +696,8 @@ var configParsers = map[string]configParseFunc{
 	"JudgeByIP":                  configParser.ParseJudgeByIP,
 	"Ipv6Policy":                 configParser.ParseIPv6Policy,
 	"DirectFallback":             configParser.ParseDirectFallback,
+	"DnsServer":                  configParser.ParseDNSServer,
+	"DnsVerify":                  configParser.ParseDNSVerify,
 	"Cert":                       configParser.ParseCert,
 	"Key":                        configParser.ParseKey,
 }

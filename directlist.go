@@ -37,6 +37,10 @@ type RouteOptions struct {
 	ParentAvailable bool
 	JudgeByIP       bool
 	IPv6            IPv6Policy
+	// TrustedDNS reports whether a resolver on an unforgeable path is
+	// available to confirm a verdict.
+	TrustedDNS bool
+	DNSVerify  dnsVerifyPolicy
 }
 
 // Router decides how a request should leave MEOW. It does not establish the
@@ -46,8 +50,9 @@ type Router interface {
 }
 
 type domainRouter struct {
-	domains  *DomainList
-	lookupIP func(context.Context, string) ([]net.IP, error)
+	domains         *DomainList
+	lookupIP        func(context.Context, string) ([]net.IP, error)
+	trustedLookupIP func(context.Context, string) ([]net.IP, error)
 }
 
 func newDomainRouter(domains *DomainList) *domainRouter {
@@ -56,7 +61,54 @@ func newDomainRouter(domains *DomainList) *domainRouter {
 		lookupIP: func(ctx context.Context, host string) ([]net.IP, error) {
 			return net.DefaultResolver.LookupIP(ctx, "ip", host)
 		},
+		trustedLookupIP: lookupWithTrustedResolver,
 	}
+}
+
+// confirm asks the trusted resolver for a second opinion on a verdict the local
+// resolver reached, when that verdict falls in the category the verify policy
+// covers. The local verdict stands whenever the trusted lookup cannot answer:
+// a resolver that is unreachable must not take routing down with it.
+func (router *domainRouter) confirm(ctx context.Context, host string, local bool, options RouteOptions) bool {
+	if !options.TrustedDNS || router.trustedLookupIP == nil {
+		return local
+	}
+	switch options.DNSVerify {
+	case dnsVerifyDomestic:
+		if !local {
+			return local
+		}
+	case dnsVerifyForeign:
+		if local {
+			return local
+		}
+	default:
+		return local
+	}
+
+	addrs, err := router.trustedLookupIP(ctx, host)
+	if err != nil {
+		debug.Printf("trusted DNS lookup for %s failed, keeping the local verdict: %v", host, err)
+		return local
+	}
+	if len(addrs) == 0 {
+		debug.Printf("trusted DNS returned no addresses for %s, keeping the local verdict", host)
+		return local
+	}
+
+	trusted := ipsShouldDirect(addrs, options.IPv6)
+	if trusted != local {
+		info.Printf("%s: local DNS said %s, trusted DNS said %s\n",
+			host, directOrProxy(local), directOrProxy(trusted))
+	}
+	return trusted
+}
+
+func directOrProxy(direct bool) string {
+	if direct {
+		return "direct"
+	}
+	return "proxy"
 }
 
 func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOptions) (domainType DomainType) {
@@ -111,6 +163,7 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 		}
 		// Weigh every answer instead of only the first one; see ipsShouldDirect.
 		shouldDirect = ipsShouldDirect(hostIPs, options.IPv6)
+		shouldDirect = router.confirm(ctx, url.Host, shouldDirect, options)
 	}
 
 	if shouldDirect {

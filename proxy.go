@@ -663,6 +663,8 @@ func (c *clientConn) getServerConn(r *Request) (*serverConn, error) {
 		ParentAvailable: !parentProxy.empty(),
 		JudgeByIP:       config.JudgeByIP,
 		IPv6:            config.IPv6Policy,
+		TrustedDNS:      trustedResolver != nil,
+		DNSVerify:       config.DNSVerify,
 	})
 	// For CONNECT method, always create new connection.
 	direct := (domainType == domainTypeDirect)
