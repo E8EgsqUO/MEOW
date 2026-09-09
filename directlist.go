@@ -88,14 +88,14 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 		return domainTypeProxy
 	}
 	debug.Printf("judging by ip")
-	var ip string
+	var shouldDirect bool
 	isIP, isPrivate := hostIsIP(url.Host)
 	if isIP {
 		if isPrivate {
 			domainList.add(url.Host, domainTypeDirect)
 			return domainTypeDirect
 		}
-		ip = url.Host
+		shouldDirect = ipShouldDirect(url.Host)
 	} else {
 		hostIPs, err := router.lookupIP(ctx, url.Host)
 		if err != nil {
@@ -106,10 +106,11 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 			errl.Printf("host lookup returned no addresses for %s", url.Host)
 			return domainTypeProxy
 		}
-		ip = hostIPs[0].String()
+		// Weigh every answer instead of only the first one; see ipsShouldDirect.
+		shouldDirect = ipsShouldDirect(hostIPs)
 	}
 
-	if ipShouldDirect(ip) {
+	if shouldDirect {
 		domainList.add(url.Host, domainTypeDirect)
 		debug.Printf("host or domain should direct")
 		return domainTypeDirect
