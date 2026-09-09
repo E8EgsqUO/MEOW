@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version           = "1.6.0"
+	version           = "1.6.1"
 	defaultListenAddr = "127.0.0.1:4411"
 )
 

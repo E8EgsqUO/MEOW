@@ -497,6 +497,24 @@ type shadowsocksParent struct {
 	cipher *ss.Cipher
 }
 
+// ssConn wraps a shadowsocks connection to restore io.Writer semantics.
+// ss.Conn.Write reports the number of *cipher* bytes written, which on the
+// first write includes the IV and therefore exceeds len(b). Callers that
+// advance through b by the returned count (writeFull, io.Copy) would panic
+// or fail. The underlying write is all-or-nothing, so report len(b) on
+// success and 0 on error -- after a write error the cipher stream is
+// desynchronized and the connection is unusable anyway.
+type ssConn struct {
+	*ss.Conn
+}
+
+func (c ssConn) Write(b []byte) (int, error) {
+	if _, err := c.Conn.Write(b); err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
 type shadowsocksConn struct {
 	net.Conn
 	parent *shadowsocksParent
@@ -561,7 +579,7 @@ func (sp *shadowsocksParent) connect(ctx context.Context, url *URL) (net.Conn, e
 		return nil, err
 	}
 	debug.Println("connected to:", url.HostPort, "via shadowsocks:", sp.server)
-	return shadowsocksConn{c, sp}, nil
+	return shadowsocksConn{ssConn{c}, sp}, nil
 }
 
 // meow parent proxy
@@ -610,8 +628,7 @@ func (cp *meowParent) connect(ctx context.Context, url *URL) (net.Conn, error) {
 	}
 	debug.Printf("connected to: %s via meow parent: %s\n",
 		url.HostPort, cp.server)
-	ssconn := ss.NewConn(c, cp.cipher.Copy())
-	return meowConn{ssconn, cp}, nil
+	return meowConn{ssConn{ss.NewConn(c, cp.cipher.Copy())}, cp}, nil
 }
 
 // For socks documentation, refer to rfc 1928 http://www.ietf.org/rfc/rfc1928.txt
