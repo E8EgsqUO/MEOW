@@ -149,6 +149,13 @@ listen = http://127.0.0.1:4411
 # HTTPS 上游代理默认校验证书。仅为兼容无法安全维护的旧自签名部署时开启
 #proxyTLSInsecureSkipVerify = false
 
+# IPv6 地址如何参与分流判断
+#   judge  按中国 IPv6 地址段判断，与 IPv4 一视同仁（默认）
+#   direct 一律直连。1.7 之前的行为，仅在 IPv6 无法到达上级代理时才需要
+#          （当年为教育网加的选项）
+#   proxy  IPv6 一律不走直连
+#ipv6Policy = judge
+
 # 最多允许使用多少个 CPU 核
 #core = 2
 

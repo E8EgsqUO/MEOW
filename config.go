@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version           = "1.6.0"
+	version           = "1.7.0"
 	defaultListenAddr = "127.0.0.1:4411"
 )
 
@@ -27,9 +27,11 @@ const (
 )
 
 type Config struct {
-	RcFile      string // config file
-	LogFile     string // path for log file
-	JudgeByIP   bool
+	RcFile    string // config file
+	LogFile   string // path for log file
+	JudgeByIP bool
+	// IPv6Policy selects how IPv6 answers take part in routing decisions.
+	IPv6Policy  IPv6Policy
 	LoadBalance LoadBalanceMode // select load balance mode
 
 	SshServer []string
@@ -81,6 +83,7 @@ func initConfig(rcFile string) {
 	config.CNIPFile = filepath.Join(config.dir, CNIPFname)
 
 	config.JudgeByIP = true
+	config.IPv6Policy = ipv6PolicyJudge
 
 	config.AuthTimeout = 2 * time.Hour
 }
@@ -608,6 +611,19 @@ func (p configParser) ParseJudgeByIP(val string) {
 	config.JudgeByIP = parseBool(val, "judgeByIP")
 }
 
+func (p configParser) ParseIPv6Policy(val string) {
+	switch strings.ToLower(val) {
+	case "judge":
+		config.IPv6Policy = ipv6PolicyJudge
+	case "direct":
+		config.IPv6Policy = ipv6PolicyDirect
+	case "proxy":
+		config.IPv6Policy = ipv6PolicyProxy
+	default:
+		Fatalf("ipv6Policy %s not supported, must be one of judge, direct, proxy\n", val)
+	}
+}
+
 func (p configParser) ParseCert(val string) {
 	config.Cert = val
 }
@@ -643,6 +659,7 @@ var configParsers = map[string]configParseFunc{
 	"DialTimeout":                configParser.ParseDialTimeout,
 	"ProxyTLSInsecureSkipVerify": configParser.ParseProxyTLSInsecureSkipVerify,
 	"JudgeByIP":                  configParser.ParseJudgeByIP,
+	"Ipv6Policy":                 configParser.ParseIPv6Policy,
 	"Cert":                       configParser.ParseCert,
 	"Key":                        configParser.ParseKey,
 }

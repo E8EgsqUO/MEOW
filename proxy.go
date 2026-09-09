@@ -661,6 +661,7 @@ func (c *clientConn) getServerConn(r *Request) (*serverConn, error) {
 	domainType := router.Route(c.ctx, r.URL, RouteOptions{
 		ParentAvailable: !parentProxy.empty(),
 		JudgeByIP:       config.JudgeByIP,
+		IPv6:            config.IPv6Policy,
 	})
 	// For CONNECT method, always create new connection.
 	direct := (domainType == domainTypeDirect)

@@ -1,4 +1,12 @@
 ## 更新说明
+- 2026-09-09 Version 1.7.0
+
+       * 中国 IP 数据改用 APNIC 官方来源，同时包含 IPv4 与 IPv6，并可由 CI 定期重新生成
+       * IPv6 不再无条件直连，新增 `ipv6Policy` 选项（judge / direct / proxy，默认 judge）
+       * 修正中国 IP 网段判断的越界与 off-by-one 错误
+       * 域名解析结果按全部地址判断，不再只看第一条记录
+       * 自定义 china_ip_list 文件中的错误行不再导致启动崩溃
+
 - 2026-09-08 Version 1.6.0
 
        * 更新 Go 工具链、依赖、CI 和跨平台构建

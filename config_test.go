@@ -112,3 +112,41 @@ func TestParseProxy(t *testing.T) {
 		t.Fatal("shadowsocks proxy parsed not as shadowsocksParent")
 	}
 }
+
+func TestParseIPv6Policy(t *testing.T) {
+	saved := config.IPv6Policy
+	defer func() { config.IPv6Policy = saved }()
+
+	parser := configParser{}
+	for _, tc := range []struct {
+		val  string
+		want IPv6Policy
+	}{
+		{"judge", ipv6PolicyJudge},
+		{"direct", ipv6PolicyDirect},
+		{"proxy", ipv6PolicyProxy},
+		{"Judge", ipv6PolicyJudge},
+		{"DIRECT", ipv6PolicyDirect},
+	} {
+		config.IPv6Policy = ipv6PolicyProxy
+		parser.ParseIPv6Policy(tc.val)
+		if config.IPv6Policy != tc.want {
+			t.Errorf("ParseIPv6Policy(%q) = %v, want %v", tc.val, config.IPv6Policy, tc.want)
+		}
+	}
+
+	if _, ok := findConfigParser("ipv6Policy"); !ok {
+		t.Error("ipv6Policy is not reachable as a config file option")
+	}
+}
+
+func TestIPv6PolicyDefaultsToJudge(t *testing.T) {
+	saved := config
+	defer func() { config = saved }()
+
+	config = Config{}
+	initConfig("/tmp/meow-test/rc")
+	if config.IPv6Policy != ipv6PolicyJudge {
+		t.Errorf("default IPv6Policy = %v, want judge", config.IPv6Policy)
+	}
+}

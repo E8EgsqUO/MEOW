@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -35,6 +36,7 @@ func newDomainList() *DomainList {
 type RouteOptions struct {
 	ParentAvailable bool
 	JudgeByIP       bool
+	IPv6            IPv6Policy
 }
 
 // Router decides how a request should leave MEOW. It does not establish the
@@ -89,13 +91,14 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 	}
 	debug.Printf("judging by ip")
 	var shouldDirect bool
-	isIP, isPrivate := hostIsIP(url.Host)
-	if isIP {
-		if isPrivate {
+	if addr, err := netip.ParseAddr(url.Host); err == nil {
+		// A literal address needs no lookup. netip understands IPv6 literals,
+		// which the old dotted-quad check silently passed on to the resolver.
+		if addrIsLocal(addr.Unmap()) {
 			domainList.add(url.Host, domainTypeDirect)
 			return domainTypeDirect
 		}
-		shouldDirect = ipShouldDirect(url.Host)
+		shouldDirect = addrShouldDirect(addr, options.IPv6)
 	} else {
 		hostIPs, err := router.lookupIP(ctx, url.Host)
 		if err != nil {
@@ -107,7 +110,7 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 			return domainTypeProxy
 		}
 		// Weigh every answer instead of only the first one; see ipsShouldDirect.
-		shouldDirect = ipsShouldDirect(hostIPs)
+		shouldDirect = ipsShouldDirect(hostIPs, options.IPv6)
 	}
 
 	if shouldDirect {
