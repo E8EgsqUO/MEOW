@@ -133,6 +133,50 @@ func TestParseRequestRejectsContentLengthWithTransferEncoding(t *testing.T) {
 	}
 }
 
+func TestParseRequestRejectsUnsupportedHTTPVersion(t *testing.T) {
+	proxySide, clientSide := net.Pipe()
+	defer proxySide.Close()
+	defer clientSide.Close()
+
+	c := newClientConn(context.Background(), proxySide, newHttpProxy("127.0.0.1:4411", "", "http"))
+	defer c.releaseBuf()
+	go func() {
+		_, _ = clientSide.Write([]byte("CONNECT example.com:443 HTTP/2.0\r\nHost: example.com:443\r\n\r\n"))
+	}()
+	var r Request
+	defer r.releaseBuf()
+	if err := parseRequest(c, &r); err == nil {
+		t.Fatal("unsupported request protocol must be rejected")
+	}
+}
+
+func TestSplitHeaderRejectsAmbiguousSyntax(t *testing.T) {
+	for _, line := range [][]byte{
+		[]byte("Bad Header: value\r\n"),
+		[]byte("Header\x00: value\r\n"),
+		[]byte("Header: value\x00more\r\n"),
+	} {
+		if _, _, err := splitHeader(line); err == nil {
+			t.Fatalf("splitHeader(%q) accepted invalid syntax", line)
+		}
+	}
+}
+
+func TestParseResponseRejectsInvalidStatusCode(t *testing.T) {
+	for _, raw := range []string{
+		"HTTP/1.1 20 OK\r\nContent-Length: 0\r\n\r\n",
+		"HTTP/1.1 1000 Nope\r\nContent-Length: 0\r\n\r\n",
+	} {
+		sv := &serverConn{bufRd: bufio.NewReader(strings.NewReader(raw))}
+		r := &Request{Method: "GET", URL: &URL{HostPort: "example.com:80"}}
+		var response Response
+		if err := parseResponse(sv, r, &response); err == nil {
+			t.Fatalf("parseResponse accepted invalid status line %q", raw)
+		}
+		response.releaseBuf()
+	}
+}
+
 func TestParentFailureCounterConcurrent(t *testing.T) {
 	p := ParentWithFail{ParentProxy: failingParent{}}
 	url := &URL{HostPort: "example.com:80", Host: "example.com", Port: "80"}

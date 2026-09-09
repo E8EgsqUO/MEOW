@@ -1,12 +1,57 @@
 package main
 
 import (
+	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type poolLogWriter func([]byte) (int, error)
+
+func (w poolLogWriter) Write(p []byte) (int, error) { return w(p) }
+
+func TestPoolCleanupDoesNotBlockWhenSlotIsRefilled(t *testing.T) {
+	cp := newTestConnPool()
+	ch := make(chan *serverConn, 1)
+	sv, counted := newTestServerConn(t, "example.com:80", time.Now().Add(time.Minute))
+	sv.Conn = meowConn{Conn: counted}
+	replacement, _ := newTestServerConn(t, "example.com:80", time.Now().Add(time.Minute))
+	defer replacement.Close()
+	ch <- sv
+	savedDebug, savedLog := debug, debugLog
+	savedCounts := status.srvConnCnt
+	debug = true
+	initStat()
+	defer func() { status.srvConnCnt = savedCounts }()
+	// Refill precisely after cleanup receives sv, while mayBeClosed checks it.
+	// This reproduces a concurrent Put without relying on scheduler timing.
+	debugLog = log.New(poolLogWriter(func(p []byte) (int, error) {
+		if strings.Contains(string(p), "meow parent would keep alive") {
+			ch <- replacement
+		}
+		return len(p), nil
+	}), "", 0)
+	defer func() { debug, debugLog = savedDebug, savedLog }()
+	done := make(chan struct{})
+	go func() { cp.closeServerConn(ch, muxConnHostPort, false); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		<-ch // Unblock the old implementation before restoring global logging.
+		<-done
+		t.Fatal("cleanup blocked while returning a connection to a full channel")
+	}
+	if counted.closes.Load() != 1 {
+		t.Fatal("connection displaced by concurrent Put was not closed")
+	}
+	if got := <-ch; got != replacement {
+		t.Fatal("cleanup displaced the newly pooled connection")
+	}
+}
 
 type countedConn struct {
 	net.Conn

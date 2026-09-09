@@ -11,6 +11,16 @@ import (
 )
 
 func main() {
+	releaseInstance, acquired, err := acquirePlatformInstance()
+	if err != nil {
+		Fatal("failed to initialize platform runtime:", err)
+	}
+	if !acquired {
+		return
+	}
+	defer releaseInstance()
+	clearStartupError()
+
 	// Parse flags after load config to allow override options in config
 	cmdLineConfig := parseCmdLineConfig()
 	if cmdLineConfig.PrintVer {

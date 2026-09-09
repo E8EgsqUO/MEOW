@@ -232,13 +232,13 @@ func expandTilde(pth string) string {
 // copyN copys N bytes from src to dst, reading at most rdSize for each read.
 // rdSize should <= buffer size of the buffered reader.
 // Returns any encountered error.
-func copyN(dst io.Writer, src *bufio.Reader, n, rdSize int) (err error) {
+func copyN(dst io.Writer, src *bufio.Reader, n int64, rdSize int) (err error) {
 	for n > 0 {
-		readSize := n
-		if readSize > rdSize {
-			readSize = rdSize
+		readSize := int64(rdSize)
+		if n < readSize {
+			readSize = n
 		}
-		b, er := src.Peek(readSize)
+		b, er := src.Peek(int(readSize))
 		nr := len(b)
 		if nr > 0 {
 			if err = writeFull(dst, b); err != nil {
@@ -247,10 +247,10 @@ func copyN(dst io.Writer, src *bufio.Reader, n, rdSize int) (err error) {
 			if _, err = src.Discard(nr); err != nil {
 				return err
 			}
-			n -= nr
+			n -= int64(nr)
 		}
 		if er == io.EOF {
-			return nil
+			return io.ErrUnexpectedEOF
 		}
 		if er != nil {
 			return er
@@ -318,6 +318,10 @@ func trimLastDot(s string) string {
 		return s[:len(s)-1]
 	}
 	return s
+}
+
+func canonicalHost(host string) string {
+	return strings.ToLower(trimLastDot(host))
 }
 
 // host2Domain returns the domain of a host. It will recognize domains like

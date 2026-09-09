@@ -87,6 +87,8 @@ func (p *relayParent) connect(ctx context.Context, u *URL) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	stopWatching := watchConnContext(ctx, c)
+	defer stopWatching()
 	// 开启 keepalive（客户端到 relay）
 	if tc, ok := c.(*net.TCPConn); ok {
 		_ = tc.SetKeepAlive(true)
@@ -168,7 +170,7 @@ func (p *relayProxy) Serve(ctx context.Context, wg *sync.WaitGroup) {
 
 	ln, err := net.Listen("tcp", p.addr)
 	if err != nil {
-		log.Printf("[relay] listen %s failed: %v", p.addr, err)
+		criticalf("[relay] listen %s failed: %v", p.addr, err)
 		return
 	}
 	go func() {

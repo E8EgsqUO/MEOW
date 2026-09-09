@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -195,7 +196,7 @@ func TestCopyN(t *testing.T) {
 		src := bufio.NewReader(strings.NewReader(testStr))
 		dst := new(bytes.Buffer)
 
-		err := copyN(dst, src, len(testStr), step)
+		err := copyN(dst, src, int64(len(testStr)), step)
 		if err != nil {
 			t.Error("unexpected err:", err)
 			break
@@ -203,6 +204,17 @@ func TestCopyN(t *testing.T) {
 		if dst.String() != testStr {
 			t.Errorf("step %d want %q, got: %q\n", step, testStr, dst.Bytes())
 		}
+	}
+}
+
+func TestCopyNReportsTruncatedInput(t *testing.T) {
+	var dst bytes.Buffer
+	err := copyN(&dst, bufio.NewReader(strings.NewReader("abc")), 10, 4)
+	if err != io.ErrUnexpectedEOF {
+		t.Fatalf("copyN error = %v, want %v", err, io.ErrUnexpectedEOF)
+	}
+	if dst.String() != "abc" {
+		t.Fatalf("copyN wrote %q, want partial input preserved", dst.String())
 	}
 }
 

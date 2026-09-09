@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -359,4 +360,23 @@ func TestHTTPUpstreamRegularKeepAliveResponse(t *testing.T) {
 		t.Fatalf("response reason was overwritten: %q", response.Reason)
 	}
 	_ = sv.Close()
+}
+
+func TestInformationalResponseDoesNotReplaceFinalResponse(t *testing.T) {
+	upstream := &fallbackResponseConn{reader: strings.NewReader(
+		"HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\n" +
+			"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")}
+	sv := newServerConn(upstream, "example.com:80")
+	defer sv.Close()
+	client := &partialWriteConn{maxWrite: 4096}
+	c := &clientConn{Conn: client, ctx: context.Background()}
+	r := newHTTPParentGETRequest(t)
+	defer r.releaseBuf()
+	var response Response
+	if err := c.readResponse(sv, r, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != 200 || !bytes.HasPrefix(client.Bytes(), []byte("HTTP/1.1 200 OK")) {
+		t.Fatalf("final response status = %d, output = %q", response.Status, client.Bytes())
+	}
 }

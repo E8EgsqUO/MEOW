@@ -1,6 +1,6 @@
 # MEOW Proxy
 
-当前版本：1.7.0 [CHANGELOG](CHANGELOG.md)
+当前版本：1.7.1 [CHANGELOG](CHANGELOG.md)
 
 <pre>
        /\
@@ -34,10 +34,15 @@
       go vet ./...
       go test -race ./...
 
-- **交叉编译所有平台：** 一次产出 Linux（amd64 / arm64 / armv7）、macOS（arm64 /
-  amd64）和 Windows（amd64 / arm64）的可执行文件：
+- **交叉编译所有平台：** 一次产出 Linux（amd64 / arm64 / armv7）、macOS（arm64）
+  和 Windows amd64 的两个版本：
 
       ./script/build-release.sh
+
+  Windows 的 `MEOW-windows-amd64.exe` 是保留控制台和实时日志的普通版本；
+  `MEOW-windows-amd64-gui.exe` 双击后在后台运行，不显示控制台窗口，运行状态可通过
+  `http://127.0.0.1:4411/status` 查看。GUI 版只允许一个实例；配置错误、端口占用等
+  关键启动错误会写入 `%TEMP%\MEOW-startup-error.log`。排错时也可使用普通版本。
 
   单独构建某个平台，例如 Windows x64：
 
@@ -57,12 +62,16 @@
 - **Linux (systemd)：** 参考 [doc/meow.service](doc/meow.service)，文件开头有安装步骤
 - **macOS (launchd)：** 参考 [doc/osx/net.ohrz.meow.plist](doc/osx/net.ohrz.meow.plist)，
   把其中的 `MEOWBINARY` 换成可执行文件的绝对路径，放进 `~/Library/LaunchAgents/`
-- **Windows：** `script/meow-taskbar.exe` 是一个托盘启动器，与 `MEOW.exe` 放在同一
-  目录即可，详见 [script/README.md](script/README.md)
+- **Windows：** 推荐使用无控制台窗口的 `MEOW-windows-amd64-gui.exe`，在
+  `shell:startup` 启动文件夹中放置它的快捷方式；普通版保留给前台运行和排错。
 
 ## 配置
 
 编辑 `~/.meow/rc` (OS X, Linux) 或 `rc.txt` (Windows)，例子：
+
+逐请求和逐响应日志默认关闭；排查问题时可用 `-request=true -reply=true` 临时开启。
+运行期间可打开 `http://127.0.0.1:4411/status` 查看最近的 DIRECT / PROXY / REJECT
+判定和聚合后的上游错误；状态页每 3 秒刷新且仅允许本机访问。
 
     # 监听地址，设为0.0.0.0可以监听所有端口，共享给局域网使用
     listen = http://127.0.0.1:4411
@@ -91,6 +100,9 @@
     - 通过本地 DNS 解析域名，得到域名的全部 IP
     - 全部都是国内 IP 才直连，否则通过代理连接
     - 将域名加入临时的直连或者强制使用代理列表，下次可以不用 DNS 解析直接判断域名是否直连
+
+自动学习的分流结果仅匹配完整主机名，不会被子域名继承；手工配置的规则优先。
+PAC 仅导出手工直连规则，其他主机交给 MEOW 使用上述缓存判定，避免临时判定在 PAC 中扩大为子域名规则。
 
 国内 IP 地址段来自 [APNIC 的地址分配数据](https://ftp.apnic.net/stats/apnic/delegated-apnic-latest)，
 编译进可执行文件，**运行时不需要联网更新，也不需要订阅任何规则**。想换用自己维护的列表，

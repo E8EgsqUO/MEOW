@@ -14,10 +14,6 @@ import (
 const CRLF = "\r\n"
 
 const (
-	statusCodeContinue = 100
-)
-
-const (
 	statusBadReq         = "400 Bad Request"
 	statusForbidden      = "403 Forbidden"
 	statusExpectFailed   = "417 Expectation Failed"
@@ -48,10 +44,11 @@ const (
 )
 
 type Request struct {
-	Method  string
-	URL     *URL
-	raw     *bytes.Buffer // stores the raw content of request header
-	rawByte []byte        // underlying buffer for raw
+	fellBackToParent bool
+	Method           string
+	URL              *URL
+	raw              *bytes.Buffer // stores the raw content of request header
+	rawByte          []byte        // underlying buffer for raw
 
 	// request line from client starts at 0, meow generates request line that
 	// can be sent directly to web server
@@ -232,9 +229,10 @@ func (url *URL) ParseHostPort(hostPort string) {
 		hostPort = net.JoinHostPort(host, port)
 	}
 
+	host = canonicalHost(host)
 	url.Host = host
 	url.Port = port
-	url.HostPort = hostPort
+	url.HostPort = net.JoinHostPort(host, port)
 	url.Domain = host2Domain(host)
 }
 
@@ -270,12 +268,15 @@ func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
 	}
 
 	var hostport, host, port, path string
-	id = bytes.IndexByte(rest, '/')
+	id = bytes.IndexAny(rest, "/?")
 	if id == -1 {
 		hostport = string(rest)
 	} else {
 		hostport = string(rest[:id])
 		path = string(rest[id:])
+		if path[0] == '?' {
+			path = "/" + path
+		}
 	}
 
 	// Must add port in host so it can be used as key to find the correct
@@ -295,6 +296,7 @@ func ParseRequestURIBytes(rawurl []byte) (*URL, error) {
 
 	// Fixed wechat image url bug, url like http://[::ffff:183.192.196.102]/mmsns/lVxxxxxx
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "[::ffff:"), "]")
+	host = canonicalHost(host)
 	hostport = net.JoinHostPort(host, port)
 	return &URL{hostport, host, port, host2Domain(host), path}, nil
 }
@@ -461,8 +463,43 @@ func splitHeader(s []byte) (name, val []byte, err error) {
 	if i < 0 {
 		return nil, nil, fmt.Errorf("malformed header: %#v", string(s))
 	}
+	if !validHeaderName(s[:i]) {
+		return nil, nil, fmt.Errorf("invalid header name: %#v", string(s[:i]))
+	}
 	// Do not lower case field value, as it maybe case sensitive
-	return ASCIIToLower(s[:i]), TrimSpace(s[i+1:]), nil
+	val = TrimSpace(s[i+1:])
+	if !validHeaderValue(val) {
+		return nil, nil, fmt.Errorf("invalid control character in header %q", s[:i])
+	}
+	return ASCIIToLower(s[:i]), val, nil
+}
+
+// RFC 7230's tchar set. Rejecting whitespace and control characters here
+// avoids ambiguous header interpretations between MEOW and the next hop.
+func validHeaderName(name []byte) bool {
+	if len(name) == 0 {
+		return false
+	}
+	for _, b := range name {
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || IsDigit(b) {
+			continue
+		}
+		switch b {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validHeaderValue(value []byte) bool {
+	for _, b := range value {
+		if (b < 0x20 && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // Learned from net.textproto. One difference is that this one keeps the
@@ -602,6 +639,9 @@ func parseRequest(c *clientConn, r *Request) (err error) {
 	if f = FieldsN(s, 3); len(f) != 3 {
 		return fmt.Errorf("malformed request line: %#v", string(s))
 	}
+	if !bytes.Equal(f[2], []byte("HTTP/1.0")) && !bytes.Equal(f[2], []byte("HTTP/1.1")) {
+		return fmt.Errorf("unsupported request protocol: %q", f[2])
+	}
 	ASCIIToUpperInplace(f[0])
 	r.Method = string(f[0])
 
@@ -656,7 +696,21 @@ func (rp *Response) hasBody(method string) bool {
 }
 
 // Parse response status and headers.
-func parseResponse(sv *serverConn, r *Request, rp *Response) (err error) {
+func parseResponse(sv *serverConn, r *Request, rp *Response) error {
+	const maxInformationalResponses = 10
+	for i := 0; i < maxInformationalResponses; i++ {
+		if err := parseResponseOnce(sv, r, rp); err != nil {
+			return err
+		}
+		if rp.Status < 100 || rp.Status >= 200 || rp.Status == 101 {
+			return nil
+		}
+		debug.Printf("ignore informational response %d for %v\n", rp.Status, r)
+	}
+	return errors.New("too many informational HTTP responses")
+}
+
+func parseResponseOnce(sv *serverConn, r *Request, rp *Response) (err error) {
 	var s []byte
 	reader := sv.bufRd
 	if s, err = reader.ReadSlice('\n'); err != nil {
@@ -680,7 +734,7 @@ func parseResponse(sv *serverConn, r *Request, rp *Response) (err error) {
 
 	rp.reset()
 	rp.Status = int(status)
-	if err != nil {
+	if err != nil || len(f[1]) != 3 || status < 100 || status > 999 {
 		return fmt.Errorf("response status not valid: %s len=%d %v", f[1], len(f[1]), err)
 	}
 	if len(f) == 3 {
@@ -721,12 +775,6 @@ func parseResponse(sv *serverConn, r *Request, rp *Response) (err error) {
 	if config.HttpErrorCode > 0 && rp.Status == config.HttpErrorCode {
 		errl.Println("Requested http code is raised")
 		return CustomHttpErr
-	}
-
-	if rp.Status == statusCodeContinue && !r.ExpectContinue {
-		// not expecting 100-continue, just ignore it and read final response
-		errl.Println("Ignore server 100 response for", r)
-		return parseResponse(sv, r, rp)
 	}
 
 	if rp.Chunking {

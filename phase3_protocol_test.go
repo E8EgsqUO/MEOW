@@ -143,6 +143,36 @@ func TestSOCKS5IPv6RequestAndFragmentedIPv6Reply(t *testing.T) {
 	}
 }
 
+func TestSOCKS5HandshakeStopsWhenContextIsCanceled(t *testing.T) {
+	original := config.ReadTimeout
+	config.ReadTimeout = 0
+	defer func() { config.ReadTimeout = original }()
+	client, server := net.Pipe()
+	defer server.Close()
+	parent := newSocksParent("unused:1080")
+	parent.dial = func(context.Context, string, string) (net.Conn, error) { return client, nil }
+	url := mustURL(t, "example.com:443")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := parent.connect(ctx, url)
+		done <- err
+	}()
+	greeting := make([]byte, len(socksMsgVerMethodSelection))
+	if _, err := io.ReadFull(server, greeting); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("canceled handshake unexpectedly succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("context cancellation did not interrupt SOCKS5 handshake")
+	}
+}
+
 func TestSOCKS5TargetFailureDoesNotPenalizeParent(t *testing.T) {
 	proxySide, serverSide := net.Pipe()
 	serverDone := socksReplyServer(t, proxySide, 4)

@@ -161,9 +161,9 @@ func (cp *ConnPool) closeServerConn(ch chan *serverConn, hostPort string, force 
 				debug.Printf("connPool channel %s: close one conn\n", hostPort)
 				sv.Close()
 			} else {
-				// Put it back and wait.
-				debug.Printf("connPool channel %s: put back conn\n", hostPort)
-				ch <- sv
+				// Another request may have filled the slot while we checked
+				// this connection. Never block the pool's cleanup worker.
+				putConnToChan(sv, ch, hostPort)
 			}
 		default:
 			if hostPort != muxConnHostPort {

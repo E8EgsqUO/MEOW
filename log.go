@@ -42,8 +42,8 @@ func init() {
 	flag.BoolVar((*bool)(&info), "info", true, "info log")
 	flag.BoolVar((*bool)(&debug), "debug", false, "debug log; writes to ./debug.log unless logFile is configured")
 	flag.BoolVar((*bool)(&errl), "err", true, "error log")
-	flag.BoolVar((*bool)(&dbgRq), "request", true, "request log")
-	flag.BoolVar((*bool)(&dbgRep), "reply", true, "reply log")
+	flag.BoolVar((*bool)(&dbgRq), "request", false, "request log")
+	flag.BoolVar((*bool)(&dbgRep), "reply", false, "reply log")
 	flag.BoolVar(&verbose, "v", false, "more info in request/response logging")
 	flag.BoolVar(&colorize, "color", false, "colorize log output")
 }
@@ -131,11 +131,22 @@ func (d responseLogging) Printf(format string, args ...interface{}) {
 }
 
 func Fatal(args ...interface{}) {
+	reportCriticalError(fmt.Sprintln(args...))
 	fmt.Println(args...)
 	os.Exit(1)
 }
 
 func Fatalf(format string, args ...interface{}) {
+	reportCriticalError(fmt.Sprintf(format, args...))
 	fmt.Printf(format, args...)
 	os.Exit(1)
+}
+
+// criticalf remains visible on the console build and also gives the Windows
+// GUI build somewhere useful to report failures that happen before a listener
+// is ready (for example, an occupied port or an invalid TLS certificate).
+func criticalf(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	reportCriticalError(msg)
+	fmt.Println(msg)
 }

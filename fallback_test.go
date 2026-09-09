@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -111,7 +113,7 @@ func newTestClientConn() *clientConn {
 	return &clientConn{Conn: client, ctx: context.Background()}
 }
 
-func TestFallBackToParentRemembersTheHost(t *testing.T) {
+func TestFallBackToParentDefersLearningUntilTargetResponds(t *testing.T) {
 	withDirectFallback(t, true)
 	pool := &stubParentPool{}
 	withParentPool(t, pool)
@@ -139,10 +141,68 @@ func TestFallBackToParentRemembersTheHost(t *testing.T) {
 	}
 
 	domainList.RLock()
-	got := domainList.Domain["blocked.example"]
+	got := domainList.learned["blocked.example"]
 	domainList.RUnlock()
-	if got != domainTypeProxy {
-		t.Errorf("host verdict = %v, want proxy", got)
+	if got != domainTypeUnknown || !r.fellBackToParent {
+		t.Errorf("host verdict = %v, pending = %v; parent connection alone must not learn", got, r.fellBackToParent)
+	}
+}
+
+type fallbackResponseConn struct {
+	partialWriteConn
+	reader io.Reader
+}
+
+func (c *fallbackResponseConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
+
+func TestFallbackLearningFromResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name, response        string
+		connect, tunnel, want bool
+	}{
+		{"http success", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", false, false, true},
+		{"http redirect", "HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n", false, false, true},
+		{"http auth failure", "HTTP/1.1 407 Auth\r\nContent-Length: 0\r\n\r\n", false, false, false},
+		{"http gateway failure", "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n", false, false, false},
+		{"connect success", "HTTP/1.1 200 OK\r\n\r\n", true, false, true},
+		{"connect error body", "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\nerror page", true, false, false},
+		{"connect eof", "", true, false, false},
+		{"tunnel data", "target response", false, true, true},
+		{"tunnel eof", "", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := domainList
+			domainList = newDomainList()
+			defer func() { domainList = saved }()
+			conn := &fallbackResponseConn{reader: strings.NewReader(tc.response)}
+			sv := newServerConn(conn, "example.com:80")
+			sv.fallbackHost = "example.com"
+			defer sv.Close()
+			c := &clientConn{Conn: &partialWriteConn{maxWrite: 4096}, ctx: context.Background()}
+			r := newHTTPParentGETRequest(t)
+			defer r.releaseBuf()
+			switch {
+			case tc.connect:
+				_ = sv.establishHTTPConnect(r, c)
+			case tc.tunnel:
+				_ = copyServer2Client(sv, c)
+			default:
+				var rp Response
+				if err := c.readResponse(sv, r, &rp); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := domainList.learned["example.com"] == domainTypeProxy; got != tc.want {
+				t.Fatalf("learned proxy = %v, want %v", got, tc.want)
+			}
+			if !tc.connect && !tc.tunnel && !tc.want {
+				// A later request on a reused connection must not learn the old host.
+				sv.finishFallback(true)
+				if domainList.learned["example.com"] != domainTypeUnknown {
+					t.Fatal("a subsequent response learned the failed target")
+				}
+			}
+		})
 	}
 }
 
@@ -167,7 +227,7 @@ func TestFallBackToParentForgetsWhenTheParentAlsoFails(t *testing.T) {
 	}
 
 	domainList.RLock()
-	got := domainList.Domain["down.example"]
+	got := domainList.learned["down.example"]
 	domainList.RUnlock()
 	if got != domainTypeUnknown {
 		t.Errorf("host verdict = %v, want it left unrecorded", got)
@@ -221,11 +281,14 @@ func TestConnectFallsBackWhenDirectDialFails(t *testing.T) {
 	_, port, _ := net.SplitHostPort(addr)
 	r := &Request{URL: mustURL(t, "closed.example:"+port)}
 
-	conn, err := c.connect(r, true)
+	conn, err := c.createServerConn(r, true)
 	if err != nil {
 		t.Fatalf("connect returned %v, want the parent connection", err)
 	}
 	defer conn.Close()
+	if conn.fallbackHost != r.URL.Host || domainList.learned[r.URL.Host] != domainTypeUnknown {
+		t.Fatal("fallback must remain pending until the target responds")
+	}
 	if pool.conns != 1 {
 		t.Errorf("parent connect called %d times, want 1", pool.conns)
 	}

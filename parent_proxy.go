@@ -27,6 +27,33 @@ type ParentProxy interface {
 	genConfig() string // for upgrading config
 }
 
+const defaultParentHandshakeTimeout = 30 * time.Second
+
+func watchConnContext(ctx context.Context, c net.Conn) func() {
+	finished := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = c.Close()
+		close(finished)
+	})
+	return func() {
+		if !stop() {
+			<-finished
+		}
+	}
+}
+
+func parentHandshakeDeadline(ctx context.Context) time.Time {
+	timeout := config.ReadTimeout
+	if timeout <= 0 {
+		timeout = defaultParentHandshakeTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	return deadline
+}
+
 // Interface for different proxy selection strategy.
 type ParentPool interface {
 	add(ParentProxy)
@@ -63,8 +90,9 @@ func initParentPool(ctx context.Context) {
 		parentProxy = &hashParentPool{*backPool}
 	case loadBalanceLatency:
 		debug.Println("latency parent pool", len(backPool.parent))
-		go updateParentProxyLatency(ctx)
-		parentProxy = newLatencyParentPool(backPool.parent)
+		latencyPool := newLatencyParentPool(backPool.parent)
+		parentProxy = latencyPool
+		go updateParentProxyLatency(ctx, latencyPool)
 	}
 }
 
@@ -216,7 +244,10 @@ func newLatencyParentPool(parent []ParentWithFail) *latencyParentPool {
 }
 
 func (pp *latencyParentPool) empty() bool {
-	return len(pp.parent) == 0
+	latencyMutex.RLock()
+	empty := len(pp.parent) == 0
+	latencyMutex.RUnlock()
+	return empty
 }
 
 func (pp *latencyParentPool) add(parent ParentProxy) {
@@ -243,10 +274,9 @@ const latencyMax = time.Hour
 var latencyMutex sync.RWMutex
 
 func (pp *latencyParentPool) connect(ctx context.Context, url *URL) (srvconn net.Conn, err error) {
-	var lp []ParentWithLatency
-	// Read slice first.
+	// Work from a stable snapshot while the background probe reorders parents.
 	latencyMutex.RLock()
-	lp = pp.parent
+	lp := append([]ParentWithLatency(nil), pp.parent...)
 	latencyMutex.RUnlock()
 
 	var skipped []int
@@ -268,7 +298,7 @@ func (pp *latencyParentPool) connect(ctx context.Context, url *URL) (srvconn net
 			debug.Println("lowest latency proxy", parent.getServer())
 			return
 		}
-		parent.latency = latencyMax
+		pp.markFailed(parent.ParentProxy)
 	}
 	// last resort, try skipped one, not likely to succeed
 	for _, skippedId := range skipped {
@@ -277,6 +307,17 @@ func (pp *latencyParentPool) connect(ctx context.Context, url *URL) (srvconn net
 		}
 	}
 	return nil, err
+}
+
+func (pp *latencyParentPool) markFailed(failed ParentProxy) {
+	latencyMutex.Lock()
+	defer latencyMutex.Unlock()
+	for i := range pp.parent {
+		if pp.parent[i].ParentProxy == failed {
+			pp.parent[i].latency = latencyMax
+			return
+		}
+	}
 }
 
 func (parent *ParentWithLatency) updateLatency(ctx context.Context, wg *sync.WaitGroup) {
@@ -323,7 +364,9 @@ func (parent *ParentWithLatency) updateLatency(ctx context.Context, wg *sync.Wai
 func (pp *latencyParentPool) updateLatency(ctx context.Context) {
 	// Create a copy, update latency for the copy.
 	var cp latencyParentPool
+	latencyMutex.RLock()
 	cp.parent = append(cp.parent, pp.parent...)
+	latencyMutex.RUnlock()
 
 	// cp.parent is value instead of pointer, if we use `_, p := range cp.parent`,
 	// the value in cp.parent will not be updated.
@@ -344,12 +387,7 @@ func (pp *latencyParentPool) updateLatency(ctx context.Context) {
 	latencyMutex.Unlock()
 }
 
-func updateParentProxyLatency(ctx context.Context) {
-	lp, ok := parentProxy.(*latencyParentPool)
-	if !ok {
-		return
-	}
-
+func updateParentProxyLatency(ctx context.Context, lp *latencyParentPool) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -564,11 +602,11 @@ func (sp *shadowsocksParent) connect(ctx context.Context, url *URL) (net.Conn, e
 		err = fmt.Errorf("dial shadowsocks server: %w", err)
 		return nil, err
 	}
+	stopWatching := watchConnContext(ctx, rawConn)
+	defer stopWatching()
 	c := ss.NewConn(rawConn, sp.cipher.Copy())
-	if config.DialTimeout > 0 {
-		_ = c.SetWriteDeadline(time.Now().Add(config.DialTimeout))
-		defer c.SetWriteDeadline(zeroTime)
-	}
+	_ = c.SetWriteDeadline(parentHandshakeDeadline(ctx))
+	defer c.SetWriteDeadline(zeroTime)
 	if _, err = c.Write(rawAddr); err != nil {
 		_ = c.Close()
 		return nil, err
@@ -693,10 +731,10 @@ func (sp *socksParent) connect(ctx context.Context, url *URL) (net.Conn, error) 
 			sp.server, url.HostPort, err)
 		return nil, err
 	}
-	if config.ReadTimeout > 0 {
-		_ = c.SetDeadline(time.Now().Add(config.ReadTimeout))
-		defer c.SetDeadline(zeroTime)
-	}
+	stopWatching := watchConnContext(ctx, c)
+	defer stopWatching()
+	_ = c.SetDeadline(parentHandshakeDeadline(ctx))
+	defer c.SetDeadline(zeroTime)
 	hasErr := false
 	defer func() {
 		if hasErr {
@@ -793,7 +831,7 @@ func (sp *socksParent) connect(ctx context.Context, url *URL) (net.Conn, error) 
 			reply:  replyBuf[1],
 			reason: message,
 		}
-		errl.Println(replyErr)
+		recordRuntimeError(url.HostPort, replyErr)
 		hasErr = true
 		return nil, replyErr
 	}

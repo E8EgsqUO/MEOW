@@ -14,6 +14,8 @@ func TestParseRequestURI(t *testing.T) {
 		url    *URL
 	}{
 		{"http://www.g.com", &URL{"www.g.com:80", "www.g.com", "80", "g.com", ""}},
+		{"http://EXAMPLE.COM?x=1", &URL{"example.com:80", "example.com", "80", "example.com", "/?x=1"}},
+		{"http://Example.COM./", &URL{"example.com:80", "example.com", "80", "example.com", "/"}},
 		{"http://plus.g.com/", &URL{"plus.g.com:80", "plus.g.com", "80", "g.com", "/"}},
 		{"https://g.com:80", &URL{"g.com:80", "g.com", "80", "g.com", ""}},
 		{"http://mail.g.com:80/", &URL{"mail.g.com:80", "mail.g.com", "80", "g.com", "/"}},

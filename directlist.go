@@ -11,7 +11,10 @@ import (
 )
 
 type DomainList struct {
+	// Domain holds configured rules, which may also match subdomains.
 	Domain map[string]DomainType
+	// learned holds runtime verdicts for exact hosts only.
+	learned map[string]DomainType
 	sync.RWMutex
 }
 
@@ -26,7 +29,8 @@ const (
 
 func newDomainList() *DomainList {
 	return &DomainList{
-		Domain: map[string]DomainType{},
+		Domain:  map[string]DomainType{},
+		learned: map[string]DomainType{},
 	}
 }
 
@@ -53,6 +57,47 @@ type domainRouter struct {
 	domains         *DomainList
 	lookupIP        func(context.Context, string) ([]net.IP, error)
 	trustedLookupIP func(context.Context, string) ([]net.IP, error)
+	localLookups    lookupGroup
+	trustedLookups  lookupGroup
+}
+
+type lookupCall struct {
+	done  chan struct{}
+	addrs []net.IP
+	err   error
+}
+
+// lookupGroup coalesces concurrent lookups for the same host. Results live
+// only until the lookup finishes; DomainList remains the routing cache.
+type lookupGroup struct {
+	sync.Mutex
+	calls map[string]*lookupCall
+}
+
+func (g *lookupGroup) do(ctx context.Context, host string, lookup func(context.Context, string) ([]net.IP, error)) ([]net.IP, error) {
+	g.Lock()
+	if g.calls == nil {
+		g.calls = make(map[string]*lookupCall)
+	}
+	if call := g.calls[host]; call != nil {
+		g.Unlock()
+		select {
+		case <-call.done:
+			return call.addrs, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	call := &lookupCall{done: make(chan struct{})}
+	g.calls[host] = call
+	g.Unlock()
+
+	call.addrs, call.err = lookup(ctx, host)
+	g.Lock()
+	delete(g.calls, host)
+	close(call.done)
+	g.Unlock()
+	return call.addrs, call.err
 }
 
 func newDomainRouter(domains *DomainList) *domainRouter {
@@ -86,7 +131,7 @@ func (router *domainRouter) confirm(ctx context.Context, host string, local bool
 		return local
 	}
 
-	addrs, err := router.trustedLookupIP(ctx, host)
+	addrs, err := router.trustedLookups.do(ctx, host, router.trustedLookupIP)
 	if err != nil {
 		debug.Printf("trusted DNS lookup for %s failed, keeping the local verdict: %v", host, err)
 		return local
@@ -117,6 +162,7 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 	domainList.RLock()
 	hostType := domainList.Domain[url.Host]
 	domainType = domainList.Domain[url.Domain]
+	cachedType := domainList.learned[url.Host]
 	domainList.RUnlock()
 
 	if hostType == domainTypeReject || domainType == domainTypeReject {
@@ -137,6 +183,9 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 		debug.Printf("host or domain should using proxy")
 		return domainTypeProxy
 	}
+	if cachedType != domainTypeUnknown {
+		return cachedType
+	}
 
 	if !options.JudgeByIP {
 		return domainTypeProxy
@@ -152,7 +201,7 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 		}
 		shouldDirect = addrShouldDirect(addr, options.IPv6)
 	} else {
-		hostIPs, err := router.lookupIP(ctx, url.Host)
+		hostIPs, err := router.localLookups.do(ctx, url.Host, router.lookupIP)
 		if err != nil {
 			errl.Printf("error looking up host ip %s, err %s", url.Host, err)
 			return domainTypeProxy
@@ -180,9 +229,11 @@ func (router *domainRouter) Route(ctx context.Context, url *URL, options RouteOp
 func (domainList *DomainList) add(host string, domainType DomainType) {
 	domainList.Lock()
 	defer domainList.Unlock()
-	domainList.Domain[host] = domainType
+	domainList.learned[host] = domainType
 }
 
+// GetDomainList returns configured direct rules for PAC's suffix matching.
+// Learned hosts stay behind MEOW so they cannot become subdomain-wide PAC rules.
 func (domainList *DomainList) GetDomainList() []string {
 	domainList.RLock()
 	defer domainList.RUnlock()
@@ -223,7 +274,7 @@ func initDomainList(domainList *DomainList, domainListFile string, domainType Do
 	loaded := 0
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		domain := strings.TrimSpace(scanner.Text())
+		domain := canonicalHost(strings.TrimSpace(scanner.Text()))
 		if domain == "" {
 			continue
 		}
