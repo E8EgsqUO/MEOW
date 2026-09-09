@@ -1,7 +1,6 @@
 # MEOW Proxy
 
-当前版本：1.6.1 [CHANGELOG](CHANGELOG.md)
-[![Build Status](https://travis-ci.org/netheril96/MEOW.png?branch=master)](https://travis-ci.org/netheril96/MEOW)
+当前版本：1.7.0 [CHANGELOG](CHANGELOG.md)
 
 <pre>
        /\
@@ -13,7 +12,7 @@
 ## 与原版MEOW的差别
 
 * 本代码仓库删除了编译好的二进制文件，大大减少了git clone时的传输大小
-* IPv6一律走直连（对于教育网用户很有用）
+* IPv6 与 IPv4 一样按中国地址段判断分流（可用 `ipv6Policy = direct` 恢复旧的一律直连行为，教育网用户可能需要）
 
 ## MEOW 可以用来
 - 作为全局 HTTP 代理（支持 PAC），可以智能分流（直连国内网站、使用代理连接其他网站）
@@ -35,7 +34,12 @@
       go vet ./...
       go test -race ./...
 
-- **Windows x64 优化构建：**
+- **交叉编译所有平台：** 一次产出 Linux（amd64 / arm64 / armv7）、macOS（arm64 /
+  amd64）和 Windows（amd64 / arm64）的可执行文件：
+
+      ./script/build-release.sh
+
+  单独构建某个平台，例如 Windows x64：
 
       CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
         -trimpath -buildvcs=false -ldflags="-s -w" \
@@ -47,6 +51,14 @@
 
       docker build -t meow .
       docker run --rm -v "$HOME/.meow:/config:ro" meow -rc /config/rc
+
+## 开机自启
+
+- **Linux (systemd)：** 参考 [doc/meow.service](doc/meow.service)，文件开头有安装步骤
+- **macOS (launchd)：** 参考 [doc/osx/net.ohrz.meow.plist](doc/osx/net.ohrz.meow.plist)，
+  把其中的 `MEOWBINARY` 换成可执行文件的绝对路径，放进 `~/Library/LaunchAgents/`
+- **Windows：** `script/meow-taskbar.exe` 是一个托盘启动器，与 `MEOW.exe` 放在同一
+  目录即可，详见 [script/README.md](script/README.md)
 
 ## 配置
 
@@ -76,9 +88,15 @@
 - 检查域名是否在直连列表中，如果在则直连
 - 检查域名是否在强制使用代理列表中，如果在则通过代理连接
 - **检查域名的 IP 是否为国内 IP**
-    - 通过本地 DNS 解析域名，得到域名的 IP
-    - 如果是国内 IP 则直连，否则通过代理连接
+    - 通过本地 DNS 解析域名，得到域名的全部 IP
+    - 全部都是国内 IP 才直连，否则通过代理连接
     - 将域名加入临时的直连或者强制使用代理列表，下次可以不用 DNS 解析直接判断域名是否直连
+
+国内 IP 地址段来自 [APNIC 的地址分配数据](https://ftp.apnic.net/stats/apnic/delegated-apnic-latest)，
+编译进可执行文件，**运行时不需要联网更新，也不需要订阅任何规则**。想换用自己维护的列表，
+把 CIDR 写进 `~/.meow/china_ip_list`（Windows 为 `china_ip_list.txt`）即可，IPv4 与 IPv6 都支持。
+
+开发时用 `./script/update-chinaip.sh` 重新生成内置数据，仓库的 CI 每月也会自动提一个更新 PR。
 
 ## 直连列表
 

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version           = "1.6.1"
+	version           = "1.7.0"
 	defaultListenAddr = "127.0.0.1:4411"
 )
 
@@ -27,9 +27,20 @@ const (
 )
 
 type Config struct {
-	RcFile      string // config file
-	LogFile     string // path for log file
-	JudgeByIP   bool
+	RcFile    string // config file
+	LogFile   string // path for log file
+	JudgeByIP bool
+	// IPv6Policy selects how IPv6 answers take part in routing decisions.
+	IPv6Policy IPv6Policy
+	// DirectFallback retries a failed direct connection through the parent
+	// proxy, and remembers the host as needing the proxy when that works.
+	DirectFallback bool
+	// DNSServer is a resolver reachable over a path that interference cannot
+	// forge replies on, consulted to confirm a routing verdict. Empty means
+	// the local resolver decides alone.
+	DNSServer string
+	// DNSVerify selects which local verdicts DNSServer is asked to confirm.
+	DNSVerify   dnsVerifyPolicy
 	LoadBalance LoadBalanceMode // select load balance mode
 
 	SshServer []string
@@ -81,6 +92,9 @@ func initConfig(rcFile string) {
 	config.CNIPFile = filepath.Join(config.dir, CNIPFname)
 
 	config.JudgeByIP = true
+	config.IPv6Policy = ipv6PolicyJudge
+	config.DirectFallback = true
+	config.DNSVerify = dnsVerifyDomestic
 
 	config.AuthTimeout = 2 * time.Hour
 }
@@ -95,13 +109,19 @@ func parseCmdLineConfig() *Config {
 	flag.StringVar(&c.RcFile, "rc", "", "config file, defaults to $HOME/.meow/rc on Unix, ./rc.txt on Windows")
 	// Specifying listen default value to StringVar would override config file options
 	flag.StringVar(&listenAddr, "listen", "", "listen address, disables listen in config")
-	flag.IntVar(&c.Core, "core", 2, "number of cores to use")
+	flag.IntVar(&c.Core, "core", 0, "number of cores to use, 0 means all of them")
 	flag.StringVar(&c.LogFile, "logFile", "", "write output to file")
 	flag.BoolVar(&c.PrintVer, "version", false, "print version")
 	flag.StringVar(&c.Cert, "cert", "", "cert for local https proxy")
 	flag.StringVar(&c.Key, "key", "", "key for local https proxy")
 
 	flag.Parse()
+
+	// -version must answer on a machine that has no config file yet, which is
+	// exactly the machine someone checks a fresh binary on.
+	if c.PrintVer {
+		return &c
+	}
 
 	if c.RcFile == "" {
 		c.RcFile = getDefaultRcFile()
@@ -608,6 +628,43 @@ func (p configParser) ParseJudgeByIP(val string) {
 	config.JudgeByIP = parseBool(val, "judgeByIP")
 }
 
+func (p configParser) ParseDNSServer(val string) {
+	if _, err := parseDNSServer(val); err != nil {
+		Fatalf("dnsServer %s: %v\n", val, err)
+	}
+	config.DNSServer = strings.TrimSpace(val)
+}
+
+func (p configParser) ParseDNSVerify(val string) {
+	switch strings.ToLower(val) {
+	case "domestic":
+		config.DNSVerify = dnsVerifyDomestic
+	case "foreign":
+		config.DNSVerify = dnsVerifyForeign
+	case "off":
+		config.DNSVerify = dnsVerifyOff
+	default:
+		Fatalf("dnsVerify %s not supported, must be one of domestic, foreign, off\n", val)
+	}
+}
+
+func (p configParser) ParseDirectFallback(val string) {
+	config.DirectFallback = parseBool(val, "directFallback")
+}
+
+func (p configParser) ParseIPv6Policy(val string) {
+	switch strings.ToLower(val) {
+	case "judge":
+		config.IPv6Policy = ipv6PolicyJudge
+	case "direct":
+		config.IPv6Policy = ipv6PolicyDirect
+	case "proxy":
+		config.IPv6Policy = ipv6PolicyProxy
+	default:
+		Fatalf("ipv6Policy %s not supported, must be one of judge, direct, proxy\n", val)
+	}
+}
+
 func (p configParser) ParseCert(val string) {
 	config.Cert = val
 }
@@ -643,6 +700,10 @@ var configParsers = map[string]configParseFunc{
 	"DialTimeout":                configParser.ParseDialTimeout,
 	"ProxyTLSInsecureSkipVerify": configParser.ParseProxyTLSInsecureSkipVerify,
 	"JudgeByIP":                  configParser.ParseJudgeByIP,
+	"Ipv6Policy":                 configParser.ParseIPv6Policy,
+	"DirectFallback":             configParser.ParseDirectFallback,
+	"DnsServer":                  configParser.ParseDNSServer,
+	"DnsVerify":                  configParser.ParseDNSVerify,
 	"Cert":                       configParser.ParseCert,
 	"Key":                        configParser.ParseKey,
 }

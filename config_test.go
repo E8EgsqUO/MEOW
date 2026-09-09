@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -110,5 +112,79 @@ func TestParseProxy(t *testing.T) {
 	_, ok = pool.parent[cnt].ParentProxy.(*shadowsocksParent)
 	if !ok {
 		t.Fatal("shadowsocks proxy parsed not as shadowsocksParent")
+	}
+}
+
+func TestParseIPv6Policy(t *testing.T) {
+	saved := config.IPv6Policy
+	defer func() { config.IPv6Policy = saved }()
+
+	parser := configParser{}
+	for _, tc := range []struct {
+		val  string
+		want IPv6Policy
+	}{
+		{"judge", ipv6PolicyJudge},
+		{"direct", ipv6PolicyDirect},
+		{"proxy", ipv6PolicyProxy},
+		{"Judge", ipv6PolicyJudge},
+		{"DIRECT", ipv6PolicyDirect},
+	} {
+		config.IPv6Policy = ipv6PolicyProxy
+		parser.ParseIPv6Policy(tc.val)
+		if config.IPv6Policy != tc.want {
+			t.Errorf("ParseIPv6Policy(%q) = %v, want %v", tc.val, config.IPv6Policy, tc.want)
+		}
+	}
+
+	if _, ok := findConfigParser("ipv6Policy"); !ok {
+		t.Error("ipv6Policy is not reachable as a config file option")
+	}
+}
+
+func TestIPv6PolicyDefaultsToJudge(t *testing.T) {
+	saved := config
+	defer func() { config = saved }()
+
+	config = Config{}
+	initConfig("/tmp/meow-test/rc")
+	if config.IPv6Policy != ipv6PolicyJudge {
+		t.Errorf("default IPv6Policy = %v, want judge", config.IPv6Policy)
+	}
+}
+
+// The -core flag used to default to 2 rather than 0. Because overrideConfig
+// treats any non-zero command line value as an explicit override, that default
+// beat the rc file and pinned every run to two cores.
+func TestRcCoreSurvivesCmdlineDefault(t *testing.T) {
+	fromRc := Config{Core: 4}
+	overrideConfig(&fromRc, &Config{})
+	if fromRc.Core != 4 {
+		t.Errorf("rc core = %d, want 4: the command line default discarded it", fromRc.Core)
+	}
+
+	fromRc = Config{Core: 4}
+	overrideConfig(&fromRc, &Config{Core: 1})
+	if fromRc.Core != 1 {
+		t.Errorf("core = %d, want 1: an explicit -core must still win", fromRc.Core)
+	}
+}
+
+// -version used to die on "fail to get config file" before it ever printed
+// anything, which is the wrong answer on a machine where MEOW is not set up.
+func TestPrintVersionNeedsNoConfigFile(t *testing.T) {
+	savedArgs, savedFlags := os.Args, flag.CommandLine
+	savedConfig := config
+	t.Cleanup(func() {
+		os.Args, flag.CommandLine = savedArgs, savedFlags
+		config = savedConfig
+	})
+
+	os.Args = []string{"meow", "-version", "-rc", filepath.Join(t.TempDir(), "does-not-exist")}
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+
+	c := parseCmdLineConfig()
+	if !c.PrintVer {
+		t.Fatal("PrintVer not set")
 	}
 }

@@ -3,7 +3,7 @@ bin/
 meow-proxy
 MEOW
 MEOW.exe
-MEOW-*.exe
+MEOW-*
 /*.exe
 direct.txt
 rc.txt
@@ -12,3 +12,4 @@ debug.log
 debug.txt
 proxy.txt
 reject.txt
+.fuse_hidden*

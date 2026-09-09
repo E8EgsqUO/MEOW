@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/md5"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -382,32 +381,4 @@ func hostAddr() (addr []string) {
 		addr = append(addr, ads[:id])
 	}
 	return addr
-}
-
-// ip to long int
-func ip2long(ipstr string) (uint32, error) {
-	ip := net.ParseIP(ipstr)
-	if ip == nil {
-		return 0, errors.New("Invalid IP")
-	}
-	ip = ip.To4()
-	if ip == nil {
-		return 0, errors.New("Not IPv4")
-	}
-	return binary.BigEndian.Uint32(ip), nil
-}
-
-// search between [start, end]
-func searchRange(start, end int, f func(int) bool) int {
-	i, j := start, end+1
-	for i < j {
-		h := i + (j-i)/2 // avoid overflow when computing h
-		// i ≤ h < j
-		if !f(h) {
-			i = h + 1 // preserves f(i-1) == false
-		} else {
-			j = h // preserves f(j) == true
-		}
-	}
-	return i
 }

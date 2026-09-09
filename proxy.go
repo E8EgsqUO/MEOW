@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -660,6 +661,9 @@ func (c *clientConn) getServerConn(r *Request) (*serverConn, error) {
 	domainType := router.Route(c.ctx, r.URL, RouteOptions{
 		ParentAvailable: !parentProxy.empty(),
 		JudgeByIP:       config.JudgeByIP,
+		IPv6:            config.IPv6Policy,
+		TrustedDNS:      trustedResolver != nil,
+		DNSVerify:       config.DNSVerify,
 	})
 	// For CONNECT method, always create new connection.
 	direct := (domainType == domainTypeDirect)
@@ -730,6 +734,57 @@ func isErrTooManyOpenFd(err error) bool {
 	return false
 }
 
+// canFallBackToParent reports whether a failed direct connection to url is
+// worth retrying through the parent proxy.
+func canFallBackToParent(url *URL) bool {
+	if !config.DirectFallback || parentProxy.empty() {
+		return false
+	}
+	// A local destination that will not answer is down, not blocked. Retrying
+	// through the parent cannot help, and it would hand an internal address to
+	// a remote server. url.Domain is empty for a bare hostname or a private
+	// address, which is the same set the router sends direct unconditionally.
+	if url.Domain == "" {
+		return false
+	}
+	if addr, err := netip.ParseAddr(url.Host); err == nil {
+		return !addrIsLocal(addr.Unmap())
+	}
+	return true
+}
+
+// fallBackToParent retries a failed direct connection through the parent proxy.
+//
+// A direct attempt that fails is the clearest evidence MEOW gets that its
+// routing verdict was wrong: a stale address table, a poisoned DNS answer or a
+// site blocked since the table was built all surface here, as a timeout or a
+// reset. Nothing has been written to the server at this point, so the retry
+// costs one connection and cannot duplicate a request.
+//
+// The new verdict is remembered only when the parent actually connects. A site
+// that is simply down fails both ways and must not be pinned to the proxy for
+// the rest of the run.
+func (c *clientConn) fallBackToParent(r *Request, directErr error) (net.Conn, error) {
+	if !canFallBackToParent(r.URL) {
+		return nil, directErr
+	}
+	if debug {
+		debug.Printf("cli(%s) direct connection to %s failed (%v), retrying through parent proxy\n",
+			c.RemoteAddr(), r.URL.HostPort, directErr)
+	}
+	srvconn, err := parentProxy.connect(c.ctx, r.URL)
+	if err != nil {
+		if debug {
+			debug.Printf("cli(%s) parent proxy also failed for %s: %v\n",
+				c.RemoteAddr(), r.URL.HostPort, err)
+		}
+		return nil, directErr
+	}
+	domainList.add(r.URL.Host, domainTypeProxy)
+	dbgRq.Printf("%s direct failed, now using parent proxy\n", r.URL)
+	return srvconn, nil
+}
+
 // MEOW !!!
 // Connect to requested server according to whether it's visit count.
 // If direct connection fails, try parent proxies.
@@ -741,6 +796,11 @@ func (c *clientConn) connect(r *Request, direct bool) (srvconn net.Conn, err err
 		if srvconn, err = connectDirect(c.ctx, r.URL); err == nil {
 			return
 		}
+		directErr := err
+		if srvconn, err = c.fallBackToParent(r, directErr); err == nil {
+			return
+		}
+		err = directErr
 		errMsg = genErrMsg(r, nil, "Direct connection failed.")
 		goto fail
 	}

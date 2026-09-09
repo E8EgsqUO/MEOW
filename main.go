@@ -42,6 +42,7 @@ func main() {
 
 	if config.JudgeByIP {
 		initCNIPData()
+		initDNS()
 	}
 
 	if config.Core > 0 {
